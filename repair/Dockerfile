@@ -13,7 +13,7 @@ RUN git clone https://github.com/gem5/gem5.git
 WORKDIR /usr/local/src/gem5
 RUN git checkout b5bb2a25aa702ad3d1a173e9e86d2addc24d9c13
 ADD repair.diff /usr/local/src/gem5
-RUN git patch repair.diff
+RUN git apply repair.diff
 ADD build.bash /usr/local/src/gem5/build.bash
 RUN chmod ugo+x build.bash
 RUN ./build.bash
