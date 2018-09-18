@@ -1,0 +1,4564 @@
+diff  -urN ./configs/common/cpu2006.py pirafix/configs/common/cpu2006.py
+--- ./configs/common/cpu2006.py	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/configs/common/cpu2006.py	2017-09-11 14:02:56.265122000 +0100
+@@ -0,0 +1,382 @@
++# Copyright (c) 2006-2008 The Regents of The University of Michigan
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are
++# met: redistributions of source code must retain the above copyright
++# notice, this list of conditions and the following disclaimer;
++# redistributions in binary form must reproduce the above copyright
++# notice, this list of conditions and the following disclaimer in the
++# documentation and/or other materials provided with the distribution;
++# neither the name of the copyright holders nor the names of its
++# contributors may be used to endorse or promote products derived from
++# this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++#
++# Authors: Nathan Binkert
++#          Timothy M. Jones
++
++import os
++import sys
++from os.path import basename, exists, join as joinpath, normpath
++from os.path import isdir, isfile, islink
++
++spec_dist = os.environ.get('M5_CPU2006', '/cpu2006/cpu2006')
++
++def copyfiles(srcdir, dstdir):
++    from filecmp import cmp as filecmp
++    from shutil import copyfile
++
++    srcdir = normpath(srcdir)
++    dstdir = normpath(dstdir)
++
++    if not isdir(dstdir):
++        os.mkdir(dstdir)
++
++    for root, dirs, files in os.walk(srcdir):
++        root = normpath(root)
++        prefix = os.path.commonprefix([root, srcdir])
++
++        root = root[len(prefix):]
++        if root.startswith('/'):
++            root = root[1:]
++
++        for entry in dirs:
++            newdir = joinpath(dstdir, root, entry)
++            if not isdir(newdir):
++                os.mkdir(newdir)
++
++        for entry in files:
++            dest = normpath(joinpath(dstdir, root, entry))
++            src = normpath(joinpath(srcdir, root, entry))
++            if not isfile(dest) or not filecmp(src, dest):
++                copyfile(src, dest)
++
++    # some of the spec benchmarks expect to be run from one directory up.
++    # just create some symlinks that solve the problem
++    inlink = joinpath(dstdir, 'input')
++    outlink = joinpath(dstdir, 'output')
++    if not exists(inlink):
++        os.symlink('.', inlink)
++    if not exists(outlink):
++        os.symlink('.', outlink)
++
++class Benchmark(object):
++    def __init__(self, isa, os, input_set):
++        if not hasattr(self.__class__, 'name'):
++            self.name = self.__class__.__name__
++
++        if not hasattr(self.__class__, 'binary'):
++            self.binary = self.name
++
++        if not hasattr(self.__class__, 'args'):
++            self.args = []
++
++        if not hasattr(self.__class__, 'output'):
++            self.output = '%s.out' % self.name
++
++        if not hasattr(self.__class__, 'simpoint'):
++            self.simpoint = None
++
++        try:
++            func = getattr(self.__class__, input_set)
++        except AttributeError:
++            raise AttributeError, \
++                  'The benchmark %s does not have the %s input set' % \
++                  (self.name, input_set)
++
++        executable = joinpath(spec_dist, 'binaries', isa, os, self.binary)
++        if not isfile(executable):
++            raise AttributeError, '%s not found' % executable
++        self.executable = executable
++
++        # root of tree for input & output data files
++        data_dir = joinpath(spec_dist, 'data', self.name)
++        # optional subtree with files shared across input sets
++        all_dir = joinpath(data_dir, 'all')
++        # dirs for input & output files for this input set
++        inputs_dir = joinpath(data_dir, input_set, 'input')
++        outputs_dir = joinpath(data_dir, input_set, 'output')
++        # keep around which input set was specified
++        self.input_set = input_set
++
++        if not isdir(inputs_dir):
++            raise AttributeError, '%s not found' % inputs_dir
++
++        self.inputs_dir = [ inputs_dir ]
++        if isdir(all_dir):
++            self.inputs_dir += [ joinpath(all_dir, 'input') ]
++        if isdir(outputs_dir):
++            self.outputs_dir = outputs_dir
++
++        if not hasattr(self.__class__, 'stdin'):
++            self.stdin = joinpath(inputs_dir, '%s.in' % self.name)
++            if not isfile(self.stdin):
++                try:
++                    infile = getattr(self.__class__, 'infile')
++                    self.stdin = joinpath(inputs_dir, infile)
++                    if not isfile(self.stdin):
++                        self.stdin = None
++                except AttributeError:
++                    self.stdin = None
++
++        if not hasattr(self.__class__, 'stdout'):
++            # self.stdout = joinpath(outputs_dir, '%s.out' % self.name)
++            # if not isfile(self.stdout):
++            #     self.stdout = None
++            self.stdout = None
++
++        func(self, isa, os)
++
++    def makeLiveProcessArgs(self, **kwargs):
++        # set up default args for LiveProcess object
++        process_args = {}
++        process_args['cmd'] = [ self.name ] + self.args
++        process_args['executable'] = self.executable
++        if self.stdin:
++            process_args['input'] = self.stdin
++        if self.stdout:
++            process_args['output'] = self.stdout
++        if self.simpoint:
++            process_args['simpoint'] = self.simpoint
++        # explicit keywords override defaults
++        process_args.update(kwargs)
++
++        return process_args
++
++    def makeLiveProcess(self, copy=True, **kwargs):
++        process_args = self.makeLiveProcessArgs(**kwargs)
++
++        # figure out working directory: use m5's outdir unless
++        # overridden by LiveProcess's cwd param
++        cwd = process_args.get('cwd')
++
++        if not cwd:
++            from m5 import options
++            cwd = options.outdir
++            process_args['cwd'] = cwd
++        if not isdir(cwd):
++            os.makedirs(cwd)
++
++        # copy input files to working directory
++        if copy:
++            for d in self.inputs_dir:
++                copyfiles(d, cwd)
++
++        # generate LiveProcess object
++        from m5.objects import LiveProcess
++        return LiveProcess(**process_args)
++
++    def __str__(self):
++        return self.name
++
++class DefaultBenchmark(Benchmark):
++    def ref(self, isa, os): pass
++    def test(self, isa, os): pass
++    def train(self, isa, os): pass
++
++class MinneDefaultBenchmark(DefaultBenchmark):
++    def smred(self, isa, os): pass
++    def mdred(self, isa, os): pass
++    def lgred(self, isa, os): pass
++
++##
++# Integer Benchmarks.
++##
++
++class perlbench(DefaultBenchmark):
++    name = 'perlbench'
++    number = 400
++
++class perlbench_checkspam(perlbench):
++    def ref(self, isa, os):
++        self.args = ['-I./lib', 'checkspam.pl', '2500', '5', '25', '11', '150',
++                     '1', '1', '1', '1']
++
++class bzip2(DefaultBenchmark):
++    name = 'bzip2'
++    number = 401
++
++class bzip2_source(bzip2):
++    def ref(self, isa, os):
++        self.args = ['input.source', '280']
++
++class gcc(DefaultBenchmark):
++    name = 'gcc'
++    number = 403
++
++class gcc_166(gcc):
++    def ref(self, isa, os):
++        self.args = ['166.i', '-o', '166.s']
++
++class mcf(DefaultBenchmark):
++    name = 'mcf'
++    number = 429
++    args = ['inp.in']
++
++class gobmk(DefaultBenchmark):
++    name = 'gobmk'
++    number = 445
++
++class gobmk_13x13(gobmk):
++    infile = '13x13.tst'
++    def ref(self, isa, os):
++        self.args = ['--quiet', '--mode', 'gtp']
++
++class hmmer(DefaultBenchmark):
++    name = 'hmmer'
++    number = 456
++
++class hmmer_nph3(hmmer):
++    def ref(self, isa, os):
++        self.args = ['nph3.hmm', 'swiss41']
++
++class sjeng(DefaultBenchmark):
++    name = 'sjeng'
++    number = 458
++    def ref(self, isa, os):
++        self.args = ['ref.txt']
++
++class libquantum(DefaultBenchmark):
++    name = 'libquantum'
++    number = 462
++    def ref(self, isa, os):
++        self.args = ['1397', '8']
++
++class h264ref(DefaultBenchmark):
++    name = 'h264ref'
++    number = 464
++
++class h264ref_fbase(h264ref):
++    def ref(self, isa, os):
++        self.args = ['-d', 'foreman_ref_encoder_baseline.cfg']
++
++class omnetpp(DefaultBenchmark):
++    name = 'omnetpp'
++    number = 471
++    args = ['omnetpp.ini']
++
++class astar(DefaultBenchmark):
++    name = 'astar'
++    number = 473
++
++class astar_biglakes(astar):
++    def ref(self, isa, os):
++        self.args = ['BigLakes2048.cfg']
++
++class xalancbmk(DefaultBenchmark):
++    name = 'xalancbmk'
++    number = 483
++    binary = 'Xalan'
++    def ref(self, isa, os):
++        self.args = ['-v', 't5.xml', 'xalanc.xsl']
++
++
++##
++# Floating Point Benchmarks.
++##
++
++class bwaves(DefaultBenchmark):
++    name = 'bwaves'
++    number = 410
++
++class gamess(DefaultBenchmark):
++    name = 'gamess'
++    number = 416
++
++class gamess_cytosine(gamess):
++    infile = 'cytosine.2.config'
++
++class milc(DefaultBenchmark):
++    name = 'milc'
++    number = 433
++    infile = 'su3imp.in'
++
++class zeusmp(DefaultBenchmark):
++    name = 'zeusmp'
++    number = 434
++
++class gromacs(DefaultBenchmark):
++    name = 'gromacs'
++    number = 435
++    def ref(self, isa, os):
++        self.args = ['-silent', '-deffnm', 'gromacs', '-nice', '0']
++
++class cactusADM(DefaultBenchmark):
++    name = 'cactusADM'
++    number = 436
++    def ref(self, isa, os):
++        self.args = ['benchADM.par']
++
++class leslie3d(DefaultBenchmark):
++    name = 'leslie3d'
++    number = 437
++
++class namd(DefaultBenchmark):
++    name = 'namd'
++    number = 444
++    def ref(self, isa, os):
++        self.args = ['--input', 'namd.input', '--iterations', '38', '--output',
++                     'namd.out']
++
++class dealII(DefaultBenchmark):
++    name = 'dealII'
++    number = 447
++    def ref(self, isa, os):
++        self.args = ['23']
++
++class soplex(DefaultBenchmark):
++    name = 'soplex'
++    number = 450
++
++class soplex_pds50(soplex):
++    def ref(self, isa, os):
++        self.args = ['-s1', '-e', '-m45000', 'pds-50.mps']
++
++class povray(DefaultBenchmark):
++    name = 'povray'
++    number = 453
++    def ref(self, isa, os):
++        self.args = ['SPEC-benchmark-ref.ini']
++
++class calculix(DefaultBenchmark):
++    name = 'calculix'
++    number = 454
++    def ref(self, isa, os):
++        self.args = ['-i', 'hyperviscoplastic']
++
++class GemsFDTD(DefaultBenchmark):
++    name = 'GemsFDTD'
++    number = 459
++
++class tonto(DefaultBenchmark):
++    name = 'tonto'
++    number = 465
++
++class lbm(DefaultBenchmark):
++    name = 'lbm'
++    number = 470
++    def ref(self, isa, os):
++        self.args = ['3000', 'reference.dat', '0', '0', '100_100_130_ldc.of']
++
++class wrf(DefaultBenchmark):
++    name = 'wrf'
++    number = 481
++
++class sphinx3(DefaultBenchmark):
++    name = 'sphinx3'
++    number = 482
++    binary = 'sphinx_livepretend'
++    def ref(self, isa, os):
++        self.args = ['ctlfile', '.', 'args.an4']
+diff  -urN ./configs/common/errOptions.py pirafix/configs/common/errOptions.py
+--- ./configs/common/errOptions.py	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/configs/common/errOptions.py	2017-09-11 14:02:56.266136000 +0100
+@@ -0,0 +1,29 @@
++def readErrFile (errFile):
++    with open (errFile, "r") as myfile:
++        words=myfile.readlines()
++    retarr=[]
++    retarr2=[]
++    retstr=""
++    retstr2=""
++    for word in words:
++        try:
++            idn=int(word)
++        except ValueError:
++            ss=word.split(":")
++            if len(ss)<2:
++                continue
++            word=ss[0]
++            word=word+";"
++            retstr=retstr+word
++            word2=ss[1]
++            word2=word2.split('\n')[0]
++            retstr2=retstr2+word2
++            continue
++        retarr2.append(retstr2)
++        retarr.append(retstr)
++        retstr=""
++        retstr2=""
++    retarr.append(retstr)
++    retarr2.append(retstr2)
++    return retarr,retarr2
++
+diff  -urN ./configs/common/O3_ARM_v7a.py pirafix/configs/common/O3_ARM_v7a.py
+--- ./configs/common/O3_ARM_v7a.py	2017-09-11 14:38:47.471562544 +0100
++++ pirafix/configs/common/O3_ARM_v7a.py	2017-09-11 14:02:56.217138000 +0100
+@@ -133,10 +133,10 @@
+     trapLatency = 13
+     backComSize = 5
+     forwardComSize = 5
+-    numPhysIntRegs = 128
+-    numPhysFloatRegs = 192
++    numPhysIntRegs = 192
++    numPhysFloatRegs = 384
+     numIQEntries = 32
+-    numROBEntries = 40
++    numROBEntries = 48
+ 
+     switched_out = False
+     branchPred = O3_ARM_v7a_BP()
+diff  -urN ./configs/common/Options.py pirafix/configs/common/Options.py
+--- ./configs/common/Options.py	2017-09-11 14:34:45.257574936 +0100
++++ pirafix/configs/common/Options.py	2017-09-11 14:02:56.231118000 +0100
+@@ -82,6 +82,9 @@
+                       Only used if multiple programs are specified. If true,
+                       then the number of threads per cpu is same as the
+                       number of programs.""")
++    parser.add_option("--errorFile", action="store", type="string",
++                      default='',
++                      help="Error file to read from")
+ 
+     # Memory Options
+     parser.add_option("--list-mem-types",
+@@ -245,6 +248,14 @@
+     parser.add_option("--errout", default="",
+                       help="Redirect stderr to a file.")
+ 
++    parser.add_option("--accRate",action='store',type="float",default="1",help="Ratio of correct instructions at corrector to total instructions there")
++    parser.add_option("--frontEndAcc",action='store',type="float",default="1",
++            help="Fault rate of fetch stage")
++    parser.add_option("--aluProb",action='store',type="float",default="1",
++            help="Probability that the instruction is not faulty at fetch")
++    parser.add_option("--sampleRate",action='store',type="float",default="0.5"
++            ,help="Sampling rate at ibuffer")
++
+ def addFSOptions(parser):
+     # Simulation options
+     parser.add_option("--timesync", action="store_true",
+diff  -urN ./configs/common/Simulation.py pirafix/configs/common/Simulation.py
+--- ./configs/common/Simulation.py	2017-09-11 14:34:45.257574936 +0100
++++ pirafix/configs/common/Simulation.py	2017-09-11 14:02:56.248127000 +0100
+@@ -1,6 +1,6 @@
+ # Copyright (c) 2012-2013 ARM Limited
+ # All rights reserved
+-# 
++#
+ # The license below extends only to copyright in the software and shall
+ # not be construed as granting a license to any other intellectual
+ # property including but not limited to intellectual property relating
+@@ -51,6 +51,7 @@
+ from m5.objects import *
+ from m5.util import *
+ 
++import errOptions
+ addToPath('../common')
+ 
+ def getCPUClass(cpu_type):
+@@ -257,19 +258,60 @@
+ 
+     return exit_event
+ 
+-def benchCheckpoints(options, maxtick, cptdir):
++def allCoresReachedMaxInsts(maxinsts, pause, cpulist):
++    cores_finished = 0
++    core_num = 0
++    for cpu in cpulist:
++        if cpu.totalInsts() >= int(maxinsts):
++            print "{0:d} cpu finished work".format(core_num)
++            cores_finished += 1
++            if pause:
++                cpu.pause(True)
++        core_num += 1
++    if cores_finished == len(cpulist):
++        if pause:
++            for cpu in cpulist:
++                cpu.pause(False)
++        return True
++    return False
++ #   return True
++
++def warmupAllCores(options, cpulist):
++    exit_event = m5.simulate()
++    exit_cause = exit_event.getCause()
++
++    while exit_cause == "a thread reached the max instruction count":
++        print "At tick {0:d} a core reached the max instruction count".format(m5.curTick())
++        m5.stats.dump()
++        if allCoresReachedMaxInsts(int(options.warmup_insts), options.pause_after_warmup, cpulist):
++            break
++
++        exit_event = m5.simulate()
++        exit_cause = exit_event.getCause()
++
++    return exit_event
++
++def benchCheckpoints(options, maxtick, cptdir, cpulist):
+     exit_event = m5.simulate(maxtick - m5.curTick())
+     exit_cause = exit_event.getCause()
+ 
+     num_checkpoints = 0
+     max_checkpoints = options.max_checkpoints
+ 
+-    while exit_cause == "checkpoint":
+-        m5.checkpoint(joinpath(cptdir, "cpt.%d"))
+-        num_checkpoints += 1
+-        if num_checkpoints == max_checkpoints:
+-            exit_cause = "maximum %d checkpoints dropped" % max_checkpoints
+-            break
++    while exit_cause == "checkpoint" or \
++            exit_cause == "a thread reached the max instruction count":
++
++        if exit_cause == "checkpoint":
++            m5.checkpoint(joinpath(cptdir, "cpt.%d"))
++            num_checkpoints += 1
++            if num_checkpoints == max_checkpoints:
++                exit_cause = "maximum %d checkpoints dropped" % max_checkpoints
++                break
++        else:
++            print "At the tick {0:d} a core reached the max instruction count".format(m5.curTick())
++            m5.stats.dump()
++            if allCoresReachedMaxInsts(options.maxinsts, options.pause_at_max_insts, cpulist):
++                break
+ 
+         exit_event = m5.simulate(maxtick - m5.curTick())
+         exit_cause = exit_event.getCause()
+@@ -443,6 +485,13 @@
+ 
+     np = options.num_cpus
+     switch_cpus = None
++    ibuffer= IBuffer()
++    ibuffer.nCPUs=np
++
++    corrector=Corrector()
++    ibuffer.nCPUs=np
++    if options.errorFile:
++        errData,errRate=errOptions.readErrFile(options.errorFile)
+ 
+     if options.prog_interval:
+         for i in xrange(np):
+@@ -451,16 +500,23 @@
+     if options.maxinsts:
+         for i in xrange(np):
+             testsys.cpu[i].max_insts_any_thread = options.maxinsts
++    o3sys=testsys.cpu
+ 
++    if cpu_class!=None:
++        cpu_class.numThreads = 2
+     if cpu_class:
+         switch_cpus = [cpu_class(switched_out=True, cpu_id=(i))
+                        for i in xrange(np)]
++        o3sys=switch_cpus
+ 
+         for i in xrange(np):
+             if options.fast_forward:
+                 testsys.cpu[i].max_insts_any_thread = int(options.fast_forward)
++            elif options.warmup_insts:
++                testsys.cpu[i].max_insts_any_thread = int(options.warmup_insts)
+             switch_cpus[i].system =  testsys
+             switch_cpus[i].workload = testsys.cpu[i].workload
++
+             switch_cpus[i].clk_domain = testsys.cpu[i].clk_domain
+             switch_cpus[i].progress_interval = testsys.cpu[i].progress_interval
+             # simulation period
+@@ -472,6 +528,27 @@
+ 
+         testsys.switch_cpus = switch_cpus
+         switch_cpu_list = [(testsys.cpu[i], switch_cpus[i]) for i in xrange(np)]
++    if options.errorFile:
++        o3sys[1].numThreads=2
++        if options.accRate:
++            o3sys[0].accuracyRate=options.accRate
++        if options.frontEndAcc:
++            o3sys[0].frontEndAccuracy=options.frontEndAcc
++        if options.aluProb:
++            o3sys[0].aluProb=options.aluProb
++        if options.sampleRate:
++            o3sys[0].samplingRate=options.sampleRate
++
++    for i in xrange(np):
++        o3sys[i].createThreads()
++
++        o3sys[i].ibuffer=ibuffer
++        o3sys[i].corrector=corrector
++        if options.errorFile:
++            o3sys[i].ePatterns=errData[i]
++            o3sys[i].ePatternRatio=errRate[i]
++
++
+ 
+     if options.repeat_switch:
+         switch_class = getCPUClass(options.cpu_type)[0]
+@@ -578,7 +655,7 @@
+         simpoints, interval_length = parseSimpointAnalysisFile(options, testsys)
+ 
+     checkpoint_dir = None
+-    if options.checkpoint_restore:
++    if options.checkpoint_restore != None:
+         cpt_starttick, checkpoint_dir = findCptDir(options, cptdir, testsys)
+     m5.instantiate(checkpoint_dir)
+ 
+@@ -624,6 +701,7 @@
+         fatal("Bad maxtick (%d) specified: " \
+               "Checkpoint starts starts from tick: %d", maxtick, cpt_starttick)
+ 
++    cpulist = testsys.cpu
+     if options.standard_switch or cpu_class:
+         if options.standard_switch:
+             print "Switch at instruction count:%s" % \
+@@ -633,12 +711,17 @@
+             print "Switch at instruction count:%s" % \
+                     str(testsys.cpu[0].max_insts_any_thread)
+             exit_event = m5.simulate()
++        elif cpu_class and options.warmup_insts:
++            print "Switch at instruction count:%s" % \
++                    str(testsys.cpu[0].max_insts_any_thread)
++            exit_event = warmupAllCores(options, testsys.cpu)
+         else:
+             print "Switch at curTick count:%s" % str(10000)
+             exit_event = m5.simulate(10000)
+         print "Switched CPUS @ tick %s" % (m5.curTick())
+ 
+         m5.switchCpus(testsys, switch_cpu_list)
++        cpulist = testsys.switch_cpus
+ 
+         if options.standard_switch:
+             print "Switch at instruction count:%d" % \
+@@ -653,6 +736,7 @@
+             print "Simulation ends instruction count:%d" % \
+                     (testsys.switch_cpus_1[0].max_insts_any_thread)
+             m5.switchCpus(testsys, switch_cpu_list1)
++            cpulist = testsys.switch_cpus_1
+ 
+     # If we're taking and restoring checkpoints, use checkpoint_dir
+     # option only for finding the checkpoints to restore from.  This
+@@ -692,11 +776,11 @@
+             exit_event = repeatSwitch(testsys, repeat_switch_cpu_list,
+                                       maxtick, options.repeat_switch)
+         else:
+-            exit_event = benchCheckpoints(options, maxtick, cptdir)
++            exit_event = benchCheckpoints(options, maxtick, cptdir, cpulist)
+ 
+     print 'Exiting @ tick %i because %s' % (m5.curTick(), exit_event.getCause())
+     if options.checkpoint_at_end:
+         m5.checkpoint(joinpath(cptdir, "cpt.%d"))
+ 
+-    if not m5.options.interactive:
+-        sys.exit(exit_event.getCode())
++    # if not m5.options.interactive:
++    #     sys.exit(exit_event.getCode())
+diff  -urN ./configs/example/jSe.py pirafix/configs/example/jSe.py
+--- ./configs/example/jSe.py	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/configs/example/jSe.py	2017-09-11 14:02:56.287147000 +0100
+@@ -0,0 +1,369 @@
++# Copyright (c) 2012-2013 ARM Limited
++# All rights reserved.
++#
++# The license below extends only to copyright in the software and shall
++# not be construed as granting a license to any other intellectual
++# property including but not limited to intellectual property relating
++# to a hardware implementation of the functionality of the software
++# licensed hereunder.  You may use the software subject to the license
++# terms below provided that you ensure that this notice is replicated
++# unmodified and in its entirety in all distributions of the software,
++# modified or unmodified, in source code or in binary form.
++#
++# Copyright (c) 2006-2008 The Regents of The University of Michigan
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are
++# met: redistributions of source code must retain the above copyright
++# notice, this list of conditions and the following disclaimer;
++# redistributions in binary form must reproduce the above copyright
++# notice, this list of conditions and the following disclaimer in the
++# documentation and/or other materials provided with the distribution;
++# neither the name of the copyright holders nor the names of its
++# contributors may be used to endorse or promote products derived from
++# this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++#
++# Authors: Steve Reinhardt
++
++# Simple test script
++#
++# "m5 test.py"
++
++import tempfile
++import optparse
++import shutil
++import sys
++import os
++import os.path
++
++import m5
++from m5.defines import buildEnv
++from m5.objects import *
++from m5.util import addToPath, fatal
++import errOptions
++addToPath('../common')
++addToPath('../ruby')
++
++import Options
++import Ruby
++import Simulation
++import CacheConfig
++import MemConfig
++from Caches import *
++import cpu2000
++import cpu2006
++
++# Check if KVM support has been enabled, we might need to do VM
++# configuration if that's the case.
++have_kvm_support = 'BaseKvmCPU' in globals()
++def is_kvm_cpu(cpu_class):
++    return have_kvm_support and cpu_class != None and \
++        issubclass(cpu_class, BaseKvmCPU)
++
++def get_processes(options):
++    """Interprets provided options and returns a list of processes"""
++
++    multiprocesses = []
++    inputs = []
++    outputs = []
++    errouts = []
++    pargs = []
++
++    workloads = options.cmd.split(';')
++    if options.input != "":
++        inputs = options.input.split(';')
++    if options.output != "":
++        outputs = options.output.split(';')
++    if options.errout != "":
++        errouts = options.errout.split(';')
++    if options.options != "":
++        pargs = options.options.split(';')
++
++    idx = 0
++    for wrkld in workloads:
++        process = LiveProcess()
++        process.executable = wrkld
++        process.cwd = os.getcwd()
++
++        if options.env:
++            with open(options.env, 'r') as f:
++                process.env = [line.rstrip() for line in f]
++
++        if len(pargs) > idx:
++            process.cmd = [wrkld] + pargs[idx].split()
++        else:
++            process.cmd = [wrkld]
++
++        if len(inputs) > idx:
++            process.input = inputs[idx]
++        if len(outputs) > idx:
++            process.output = outputs[idx]
++        if len(errouts) > idx:
++            process.errout = errouts[idx]
++
++        multiprocesses.append(process)
++        idx += 1
++
++    if options.smt:
++        assert(options.cpu_type == "detailed")
++        return multiprocesses, idx
++    else:
++        return multiprocesses, 1
++
++
++parser = optparse.OptionParser()
++Options.addCommonOptions(parser)
++Options.addSEOptions(parser)
++parser.add_option('--suite', choices=['cpu2000', 'cpu2006'], default='cpu2006',
++                  help="Choose a benchmark suite to execute from")
++parser.add_option('--pause-at-max-insts', action='store_true', default=False,
++                  help="Pause cores when they reach their maximum instruction count")
++parser.add_option('--pause-after-warmup', action='store_true', default=False,
++                  help="Pause cores when they finish their warmup instructions")
++parser.add_option('--run-in-checkpoint-dir', action='store_true', default=False,
++                  help="Run the benchmarks within the checkpoint directory")
++parser.add_option('--run-in-tmp-dir', action='store_true', default=False,
++                  help="Run the benchmarks within a temporary directory")
++parser.add_option('--copy-checkpoint-dir', action='store_true', default=False,
++                  help="Copy the checkpoint directory to temporary space before running")
++
++if '--ruby' in sys.argv:
++    Ruby.define_options(parser)
++
++(options, args) = parser.parse_args()
++
++if args:
++    print "Error: script doesn't take any positional arguments"
++    sys.exit(1)
++
++multiprocesses = []
++numThreads = 1
++
++removeRunDir = None
++if options.copy_checkpoint_dir:
++    import fileinput, re, stat
++    tmpdir = tempfile.mkdtemp()
++    removeRunDir = tmpdir
++    if not os.path.isdir(tmpdir):
++        fatal("Can't find temporary directory to run within")
++    if options.checkpoint_dir.endswith('.tar.bz2'):
++        import tarfile
++        tf = tarfile.open(options.checkpoint_dir)
++        tf.extractall(tmpdir)
++        tf.close()
++        tmpdir = os.path.join(tmpdir, os.path.basename(os.path.normpath(options.checkpoint_dir))[:-8])
++    else:
++        cpu2006.copyfiles(options.checkpoint_dir, tmpdir)
++    options.checkpoint_dir = tmpdir
++    print "Using temporary directory", tmpdir
++    pattern = re.compile(r'gem5/inputs/arm/cpu2006/checkpoints/\d+c/[\w-]+')
++    os.chmod(tmpdir, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
++    for root, dirs, files in os.walk(tmpdir):
++        for entry in dirs:
++            os.chmod(os.path.join(root, entry), stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
++        for entry in files:
++            fullpath = os.path.join(root, entry)
++            os.chmod(fullpath, stat.S_IRUSR | stat.S_IWUSR)
++            if entry == 'm5.cpt':
++                for line in fileinput.input(fullpath, inplace=1):
++                    line = re.sub(pattern, tmpdir, line.rstrip())
++                    print line
++    if not options.run_in_tmp_dir:
++        options.run_in_checkpoint_dir = True
++
++if options.run_in_checkpoint_dir:
++    if options.checkpoint_dir:
++        rundir = options.checkpoint_dir
++    elif m5.options.outdir:
++        rundir = m5.options.outdir
++    else:
++        fatal("Must specify checkpoint-dir or sim outdir with run-in-checkpoint-dir")
++elif options.run_in_tmp_dir:
++    rundir = tempfile.mkdtemp()
++    if not os.path.isdir(rundir):
++        fatal("Can't find temporary directory to run within")
++    removeRunDir = rundir
++elif m5.options.outdir:
++    rundir = m5.options.outdir
++else:
++    fatal("Can't find a directory to run in")
++
++if options.bench:
++    apps = options.bench.split("-")
++    if len(apps) != options.num_cpus:
++        print "number of benchmarks not equal to set num_cpus!"
++        sys.exit(1)
++
++    for app in apps:
++        try:
++            if buildEnv['TARGET_ISA'] == 'alpha':
++                exec("workload = %s('alpha', 'tru64', '%s')" % (
++                        app, options.spec_input))
++            elif buildEnv['TARGET_ISA'] == 'arm':
++                exec("workload = %s.%s('arm_%s', 'linux', '%s')" % (
++                        options.suite, app, options.arm_iset, options.spec_input))
++            else:
++                exec("workload = %s(buildEnv['TARGET_ISA', 'linux', '%s')" % (
++                        app, options.spec_input))
++            if options.copy_checkpoint_dir:
++                appdir = rundir
++                copyfiles = False
++            else:
++                appdir = tempfile.mkdtemp(dir=rundir)
++                copyfiles = True
++            multiprocesses.append(workload.makeLiveProcess(cwd=appdir, copy=copyfiles))
++        except Exception as e:
++            print >>sys.stderr, e
++
++            print >>sys.stderr, "Unable to find workload for %s: %s" % (
++                    buildEnv['TARGET_ISA'], app)
++            sys.exit(1)
++elif options.cmd:
++    multiprocesses, numThreads = get_processes(options)
++else:
++    print >> sys.stderr, "No workload specified. Exiting!\n"
++    sys.exit(1)
++
++if options.errorFile:
++    errData,errRate=errOptions.readErrFile(options.errorFile)
++    numThreads=2
++
++
++(CPUClass, test_mem_mode, FutureClass) = Simulation.setCPUClass(options)
++CPUClass.numThreads = numThreads
++
++# Check -- do not allow SMT with multiple CPUs
++if options.smt and options.num_cpus > 1:
++    fatal("You cannot use SMT with multiple CPUs!")
++
++np = options.num_cpus
++system = System(cpu = [CPUClass(cpu_id=i) for i in xrange(np)],
++                mem_mode = test_mem_mode,
++                mem_ranges = [AddrRange(options.mem_size)],
++                cache_line_size = options.cacheline_size)
++
++# Create a top-level voltage domain
++system.voltage_domain = VoltageDomain(voltage = options.sys_voltage)
++
++# Create a source clock for the system and set the clock period
++system.clk_domain = SrcClockDomain(clock =  options.sys_clock,
++                                   voltage_domain = system.voltage_domain)
++
++# Create a CPU voltage domain
++system.cpu_voltage_domain = VoltageDomain()
++
++# Create a separate clock domain for the CPUs
++system.cpu_clk_domain = SrcClockDomain(clock = options.cpu_clock,
++                                       voltage_domain =
++                                       system.cpu_voltage_domain)
++
++# All cpus belong to a common cpu_clk_domain, therefore running at a common
++# frequency.
++for cpu in system.cpu:
++    cpu.clk_domain = system.cpu_clk_domain
++if options.errorFile:
++    system.cpu[0].numThreads=1
++    ibuffer= IBuffer()
++    ibuffer.nCPUs=np
++
++    corrector=Corrector()
++    ibuffer.nCPUs=np
++
++if is_kvm_cpu(CPUClass) or is_kvm_cpu(FutureClass):
++    if buildEnv['TARGET_ISA'] == 'x86':
++        system.vm = KvmVM()
++        for process in multiprocesses:
++            process.useArchPT = True
++            process.kvmInSE = True
++    else:
++        fatal("KvmCPU can only be used in SE mode with x86")
++
++# Sanity check
++if options.fastmem:
++    if CPUClass != AtomicSimpleCPU:
++        fatal("Fastmem can only be used with atomic CPU!")
++    if (options.caches or options.l2cache):
++        fatal("You cannot use fastmem in combination with caches!")
++
++if options.simpoint_profile:
++    if not options.fastmem:
++        # Atomic CPU checked with fastmem option already
++        fatal("SimPoint generation should be done with atomic cpu and fastmem")
++    if np > 1:
++        fatal("SimPoint generation not supported with more than one CPUs")
++
++for i in xrange(np):
++    if options.smt:
++        system.cpu[i].workload = multiprocesses
++    elif len(multiprocesses) == 1:
++        system.cpu[i].workload = multiprocesses[0]
++    else:
++        system.cpu[i].workload = multiprocesses[i]
++    if options.fastmem:
++        system.cpu[i].fastmem = True
++    if options.errorFile:
++        system.cpu[i].ePatterns=errData[i]
++        system.cpu[i].ePatternRatio=errRate[i]
++        system.cpu[i].ibuffer=ibuffer
++        system.cpu[i].corrector=corrector
++
++    if options.simpoint_profile:
++        system.cpu[i].addSimPointProbe(options.simpoint_interval)
++
++    if options.checker:
++        system.cpu[i].addCheckerCpu()
++
++    system.cpu[i].createThreads()
++
++if options.ruby:
++    if options.cpu_type == "atomic" or options.cpu_type == "AtomicSimpleCPU":
++        print >> sys.stderr, "Ruby does not work with atomic cpu!!"
++        sys.exit(1)
++
++    Ruby.create_system(options, False, system)
++    assert(options.num_cpus == len(system.ruby._cpu_ports))
++
++    system.ruby.clk_domain = SrcClockDomain(clock = options.ruby_clock,
++                                        voltage_domain = system.voltage_domain)
++    for i in xrange(np):
++        ruby_port = system.ruby._cpu_ports[i]
++
++        # Create the interrupt controller and connect its ports to Ruby
++        # Note that the interrupt controller is always present but only
++        # in x86 does it have message ports that need to be connected
++        system.cpu[i].createInterruptController()
++
++        # Connect the cpu's cache ports to Ruby
++        system.cpu[i].icache_port = ruby_port.slave
++        system.cpu[i].dcache_port = ruby_port.slave
++        if buildEnv['TARGET_ISA'] == 'x86':
++            system.cpu[i].interrupts.pio = ruby_port.master
++            system.cpu[i].interrupts.int_master = ruby_port.slave
++            system.cpu[i].interrupts.int_slave = ruby_port.master
++            system.cpu[i].itb.walker.port = ruby_port.slave
++            system.cpu[i].dtb.walker.port = ruby_port.slave
++else:
++    MemClass = Simulation.setMemClass(options)
++    system.membus = SystemXBar()
++    system.system_port = system.membus.slave
++    CacheConfig.config_cache(options, system)
++    MemConfig.config_mem(options, system)
++
++root = Root(full_system = False, system = system)
++Simulation.run(options, root, system, FutureClass)
++
++if removeRunDir is not None:
++    shutil.rmtree(removeRunDir)
+diff  -urN ./configs/example/se.py pirafix/configs/example/se.py
+--- ./configs/example/se.py	2017-09-11 14:38:57.463484886 +0100
++++ pirafix/configs/example/se.py	2017-09-11 14:02:56.304123000 +0100
+@@ -42,15 +42,17 @@
+ #
+ # "m5 test.py"
+ 
++import tempfile
+ import optparse
++import shutil
+ import sys
+ import os
++import os.path
+ 
+ import m5
+ from m5.defines import buildEnv
+ from m5.objects import *
+ from m5.util import addToPath, fatal
+-
+ addToPath('../common')
+ addToPath('../ruby')
+ 
+@@ -60,7 +62,8 @@
+ import CacheConfig
+ import MemConfig
+ from Caches import *
+-from cpu2000 import *
++import cpu2000
++import cpu2006
+ 
+ # Check if KVM support has been enabled, we might need to do VM
+ # configuration if that's the case.
+@@ -123,6 +126,18 @@
+ parser = optparse.OptionParser()
+ Options.addCommonOptions(parser)
+ Options.addSEOptions(parser)
++parser.add_option('--suite', choices=['cpu2000', 'cpu2006'], default='cpu2006',
++                  help="Choose a benchmark suite to execute from")
++parser.add_option('--pause-at-max-insts', action='store_true', default=False,
++                  help="Pause cores when they reach their maximum instruction count")
++parser.add_option('--pause-after-warmup', action='store_true', default=False,
++                  help="Pause cores when they finish their warmup instructions")
++parser.add_option('--run-in-checkpoint-dir', action='store_true', default=False,
++                  help="Run the benchmarks within the checkpoint directory")
++parser.add_option('--run-in-tmp-dir', action='store_true', default=False,
++                  help="Run the benchmarks within a temporary directory")
++parser.add_option('--copy-checkpoint-dir', action='store_true', default=False,
++                  help="Copy the checkpoint directory to temporary space before running")
+ 
+ if '--ruby' in sys.argv:
+     Ruby.define_options(parser)
+@@ -136,6 +151,56 @@
+ multiprocesses = []
+ numThreads = 1
+ 
++removeRunDir = None
++if options.copy_checkpoint_dir:
++    import fileinput, re, stat
++    tmpdir = tempfile.mkdtemp()
++    removeRunDir = tmpdir
++    if not os.path.isdir(tmpdir):
++        fatal("Can't find temporary directory to run within")
++    if options.checkpoint_dir.endswith('.tar.bz2'):
++        import tarfile
++        tf = tarfile.open(options.checkpoint_dir)
++        tf.extractall(tmpdir)
++        tf.close()
++        tmpdir = os.path.join(tmpdir, os.path.basename(os.path.normpath(options.checkpoint_dir))[:-8])
++    else:
++        cpu2006.copyfiles(options.checkpoint_dir, tmpdir)
++    options.checkpoint_dir = tmpdir
++    print "Using temporary directory", tmpdir
++    pattern = re.compile(r'/checkpoints/dual/(\w|\-|\_\d)+')
++    os.chmod(tmpdir, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
++    for root, dirs, files in os.walk(tmpdir):
++        for entry in dirs:
++            os.chmod(os.path.join(root, entry), stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
++        for entry in files:
++            fullpath = os.path.join(root, entry)
++            os.chmod(fullpath, stat.S_IRUSR | stat.S_IWUSR)
++            if entry == 'm5.cpt':
++                print entry
++                for line in fileinput.input(fullpath, inplace=1):
++                    line = re.sub(pattern, tmpdir, line.rstrip())
++                    print line
++    if not options.run_in_tmp_dir:
++        options.run_in_checkpoint_dir = True
++
++if options.run_in_checkpoint_dir:
++    if options.checkpoint_dir:
++        rundir = options.checkpoint_dir
++    elif m5.options.outdir:
++        rundir = m5.options.outdir
++    else:
++        fatal("Must specify checkpoint-dir or sim outdir with run-in-checkpoint-dir")
++elif options.run_in_tmp_dir:
++    rundir = tempfile.mkdtemp()
++    if not os.path.isdir(rundir):
++        fatal("Can't find temporary directory to run within")
++    removeRunDir = rundir
++elif m5.options.outdir:
++    rundir = m5.options.outdir
++else:
++    fatal("Can't find a directory to run in")
++
+ if options.bench:
+     apps = options.bench.split("-")
+     if len(apps) != options.num_cpus:
+@@ -148,13 +213,22 @@
+                 exec("workload = %s('alpha', 'tru64', '%s')" % (
+                         app, options.spec_input))
+             elif buildEnv['TARGET_ISA'] == 'arm':
+-                exec("workload = %s('arm_%s', 'linux', '%s')" % (
+-                        app, options.arm_iset, options.spec_input))
++                exec("workload = %s.%s('arm_%s', 'linux', '%s')" % (
++                        options.suite, app, options.arm_iset, options.spec_input))
+             else:
+                 exec("workload = %s(buildEnv['TARGET_ISA', 'linux', '%s')" % (
+                         app, options.spec_input))
+-            multiprocesses.append(workload.makeLiveProcess())
+-        except:
++            if options.copy_checkpoint_dir:
++                print rundir
++                appdir = rundir
++                copyfiles = False
++            else:
++                appdir = tempfile.mkdtemp(dir=rundir)
++                copyfiles = True
++            multiprocesses.append(workload.makeLiveProcess(cwd=appdir, copy=copyfiles))
++        except Exception as e:
++            print >>sys.stderr, e
++
+             print >>sys.stderr, "Unable to find workload for %s: %s" % (
+                     buildEnv['TARGET_ISA'], app)
+             sys.exit(1)
+@@ -178,6 +252,9 @@
+                 mem_ranges = [AddrRange(options.mem_size)],
+                 cache_line_size = options.cacheline_size)
+ 
++
++
++
+ # Create a top-level voltage domain
+ system.voltage_domain = VoltageDomain(voltage = options.sys_voltage)
+ 
+@@ -221,6 +298,13 @@
+     if np > 1:
+         fatal("SimPoint generation not supported with more than one CPUs")
+ 
++# ibuffer= IBuffer()
++# ibuffer.nCPUs=np
++
++# corrector=Corrector()
++# ibuffer.nCPUs=np
++# if options.errorFile:
++#     errData,errRate=errOptions.readErrFile(options.errorFile)
+ for i in xrange(np):
+     if options.smt:
+         system.cpu[i].workload = multiprocesses
+@@ -228,16 +312,19 @@
+         system.cpu[i].workload = multiprocesses[0]
+     else:
+         system.cpu[i].workload = multiprocesses[i]
+-
++    # system.cpu[i].ibuffer=ibuffer
++    # system.cpu[i].corrector=corrector
+     if options.fastmem:
+         system.cpu[i].fastmem = True
++    # if options.errorFile:
++    #     system.cpu[i].ePatterns=errData[i]
++    #     system.cpu[i].ePatternRatio=errRate[i]
+ 
+     if options.simpoint_profile:
+         system.cpu[i].addSimPointProbe(options.simpoint_interval)
+ 
+     if options.checker:
+         system.cpu[i].addCheckerCpu()
+-
+     system.cpu[i].createThreads()
+ 
+ if options.ruby:
+@@ -276,3 +363,6 @@
+ 
+ root = Root(full_system = False, system = system)
+ Simulation.run(options, root, system, FutureClass)
++
++if removeRunDir is not None:
++    shutil.rmtree(removeRunDir)
+diff  -urN ./configs/example/se.py.rej pirafix/configs/example/se.py.rej
+--- ./configs/example/se.py.rej	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/configs/example/se.py.rej	2017-01-04 15:55:14.748677000 +0000
+@@ -0,0 +1,21 @@
++--- se.py
+++++ se.py
++@@ -203,9 +207,15 @@
++             else:
++                 exec("workload = %s(buildEnv['TARGET_ISA', 'linux', '%s')" % (
++                         app, options.spec_input))
++-            appdir = tempfile.mkdtemp(dir=rundir)
++-            multiprocesses.append(workload.makeLiveProcess(cwd=appdir))
++-        except:
+++            if options.copy_checkpoint_dir:
+++                appdir = rundir
+++                copyfiles = False
+++            else:
+++                appdir = tempfile.mkdtemp(dir=rundir)
+++                copyfiles = True
+++            multiprocesses.append(workload.makeLiveProcess(cwd=appdir, copy=copyfiles))
+++        except Exception as e:
+++            print >>sys.stderr, e
++             print >>sys.stderr, "Unable to find workload for %s: %s" % (buildEnv['TARGET_ISA'], app)
++             sys.exit(1)
++ elif options.cmd:
+diff  -urN ./SConstruct pirafix/SConstruct
+--- ./SConstruct	2017-09-11 14:34:45.229575178 +0100
++++ pirafix/SConstruct	2017-09-11 14:02:56.198123000 +0100
+@@ -559,7 +559,7 @@
+     # We always compile using C++11
+     main.Append(CXXFLAGS=['-std=c++11'])
+     # Add selected sanity checks from -Wextra
+-    main.Append(CXXFLAGS=['-Wmissing-field-initializers',
++    main.Append(CXXFLAGS=['-Wmissing-field-initializers','-fstack-protector-all',
+                           '-Woverloaded-virtual'])
+ else:
+     print termcap.Yellow + termcap.Bold + 'Error' + termcap.Normal,
+diff  -urN ./src/arch/arm/intregs.hh pirafix/src/arch/arm/intregs.hh
+--- ./src/arch/arm/intregs.hh	2015-03-19 14:14:11.000000000 +0000
++++ pirafix/src/arch/arm/intregs.hh	2017-09-11 14:02:56.332183000 +0100
+@@ -491,8 +491,8 @@
+       case MODE_UNDEFINED:
+         return INTREG_UND(reg);
+       default:
+-        panic("%d: Flattening into an unknown mode: reg:%#x mode:%#x\n",
+-                curTick(), reg, mode);
++        panic("%d: Flattening into an unknown mode: reg:%lli mode:%lli permode:%lli Reg actual index %lli \n",
++                curTick(), reg, mode,intRegsPerMode,mode*intRegsPerMode+reg);
+     }
+ }
+ 
+diff  -urN ./src/cpu/base.cc pirafix/src/cpu/base.cc
+--- ./src/cpu/base.cc	2017-09-11 14:38:38.675630896 +0100
++++ pirafix/src/cpu/base.cc	2017-09-11 14:02:56.370138000 +0100
+@@ -452,8 +452,10 @@
+         else
+             tc->setContextId(system->registerThreadContext(tc));
+ 
+-        if (!FullSystem)
+-            tc->getProcessPtr()->assignThreadContext(tc->contextId());
++        if (!FullSystem){
++            if(tc->getProcessPtr()!=NULL)
++                tc->getProcessPtr()->assignThreadContext(tc->contextId());
++        }
+     }
+ }
+ 
+@@ -485,7 +487,7 @@
+ void
+ BaseCPU::takeOverFrom(BaseCPU *oldCPU)
+ {
+-    assert(threadContexts.size() == oldCPU->threadContexts.size());
++//    assert(threadContexts.size() == oldCPU->threadContexts.size());
+     assert(_cpuId == oldCPU->cpuId());
+     assert(_switchedOut);
+     assert(oldCPU != this);
+@@ -494,7 +496,9 @@
+     _switchedOut = false;
+ 
+     ThreadID size = threadContexts.size();
+-    for (ThreadID i = 0; i < size; ++i) {
++//    for (ThreadID i = 0; i < size; ++i) 
++    ThreadID i=0;    
++    {
+         ThreadContext *newTC = threadContexts[i];
+         ThreadContext *oldTC = oldCPU->threadContexts[i];
+ 
+diff  -urN ./src/cpu/BaseCPU.py pirafix/src/cpu/BaseCPU.py
+--- ./src/cpu/BaseCPU.py	2017-09-11 14:38:18.471787849 +0100
++++ pirafix/src/cpu/BaseCPU.py	2017-09-11 14:02:56.355147000 +0100
+@@ -95,6 +95,7 @@
+     def export_methods(cls, code):
+         code('''
+     void switchOut();
++    void pause(bool pause);
+     void takeOverFrom(BaseCPU *cpu);
+     bool switchedOut();
+     void flushTLBs();
+@@ -205,7 +206,6 @@
+     switched_out = Param.Bool(False,
+         "Leave the CPU switched out after startup (used when switching " \
+         "between CPU models)")
+-
+     tracer = Param.InstTracer(default_tracer, "Instruction tracer")
+ 
+     icache_port = MasterPort("Instruction Port")
+diff  -urN ./src/cpu/base_dyn_inst.hh pirafix/src/cpu/base_dyn_inst.hh
+--- ./src/cpu/base_dyn_inst.hh	2017-09-11 14:39:25.599266130 +0100
++++ pirafix/src/cpu/base_dyn_inst.hh	2017-09-11 14:02:56.405122000 +0100
+@@ -51,6 +51,7 @@
+ #include <list>
+ #include <string>
+ #include <queue>
++#include<deque>
+ 
+ #include "arch/generic/tlb.hh"
+ #include "arch/utility.hh"
+@@ -68,6 +69,7 @@
+ #include "sim/byteswap.hh"
+ #include "sim/system.hh"
+ 
++#include"cpu/commonTypes.hh"
+ /**
+  * @file
+  * Defines a dynamic instruction context.
+@@ -103,7 +105,12 @@
+         void set(double d) { dbl = d; }
+         void get(uint64_t& i) { i = integer; }
+         void get(double& d) { d = dbl; }
++        bool compare(uint64_t x){return (x==integer);}
++        bool compare(Result r){return (r.integer==integer);}
+     };
++    bool compareVals(Result a, Result b){
++        return a.compare(b);
++    }
+ 
+   protected:
+     enum Status {
+@@ -129,6 +136,7 @@
+                                  /// instructions ahead of it
+         SerializeAfter,          /// Needs to serialize instructions behind it
+         SerializeHandled,        /// Serialization has been handled
++        ReRunCompleted,
+         NumStatus
+     };
+ 
+@@ -172,11 +180,35 @@
+     /** InstRecord that tracks this instructions. */
+     Trace::InstRecord *traceData;
+ 
++    bool testResults(){
++        /* if(instResult.size()!=instResult2.size()){ */
++        /*     return false; */
++        /* } */
++        /* typename std::list<Result>::const_iterator iterator; */
++        /* typename std::list<Result>::const_iterator iter2=instResult2.begin(); */
++        /* for(iterator=instResult.begin();iterator!=instResult.end();iterator++){ */
++        /*     if((*iterator).integer!=(*iter2).integer){ */
++        /*         return false; */
++        /*     } */
++        /*     iter2++; */
++        /* } */
++        return true;
++    }
++
++
+   protected:
+-    /** The result of the instruction; assumes an instruction can have many
++/*    ** The result of the instruction; assumes an instruction can have many
+      *  destination registers.
+-     */
+-    std::queue<Result> instResult;
++     *
++    std::list<Result> instResult2;
++    */
++    typedef struct{
++        Result r;
++        int idx;
++        inTypes_t tp;
++    }input_t;
++
++    std::deque<input_t> instInput;
+ 
+     /** PC state for this instruction. */
+     TheISA::PCState pc;
+@@ -193,6 +225,10 @@
+     std::bitset<MaxInstSrcRegs> _readySrcRegIdx;
+ 
+   public:
++
++    std::list<Result> instResult;
++
++    typedef typename std::list<Result>::const_iterator resultIter;
+     /** The thread this instruction is from. */
+     ThreadID threadNumber;
+ 
+@@ -240,6 +276,8 @@
+     /** Store queue index. */
+     int16_t sqIdx;
+ 
++    bool rerunAct;
++
+ 
+     /////////////////////// TLB Miss //////////////////////
+     /**
+@@ -264,12 +302,12 @@
+     /** Flattened register index of the destination registers of this
+      *  instruction.
+      */
+-    std::array<TheISA::RegIndex, TheISA::MaxInstDestRegs> _flatDestRegIdx;
++    std::array<TheISA::RegIndex, TheISA::MaxInstDestRegs+8> _flatDestRegIdx;
+ 
+     /** Physical register index of the destination registers of this
+      *  instruction.
+      */
+-    std::array<PhysRegIndex, TheISA::MaxInstDestRegs> _destRegIdx;
++    std::array<PhysRegIndex, TheISA::MaxInstDestRegs+8> _destRegIdx;
+ 
+     /** Physical register index of the source registers of this
+      *  instruction.
+@@ -279,7 +317,9 @@
+     /** Physical register index of the previous producers of the
+      *  architected destinations.
+      */
+-    std::array<PhysRegIndex, TheISA::MaxInstDestRegs> _prevDestRegIdx;
++    std::array<PhysRegIndex, TheISA::MaxInstDestRegs+8> _prevDestRegIdx;
++
++
+ 
+ 
+   public:
+@@ -405,6 +445,7 @@
+                        PhysRegIndex renamed_dest,
+                        PhysRegIndex previous_rename)
+     {
++
+         _destRegIdx[idx] = renamed_dest;
+         _prevDestRegIdx[idx] = previous_rename;
+     }
+@@ -508,6 +549,8 @@
+     /** Returns whether the instruction mispredicted. */
+     bool mispredicted()
+     {
++        if(isSecondaryRerunInst())
++            return false;
+         TheISA::PCState tempPC = pc;
+         TheISA::advancePC(tempPC, staticInst);
+         return !(tempPC == predPC);
+@@ -540,6 +583,11 @@
+     { return staticInst->isSerializeBefore() || status[SerializeBefore]; }
+     bool isSerializeAfter() const
+     { return staticInst->isSerializeAfter() || status[SerializeAfter]; }
++    /*This one is for the remote instruction and not the local instruction. 
++     * The naming needs a bit more work. TODO
++     * */
++    bool isSecondaryRerunInst(){return rerunAct;}
++    void setSecondaryRerunInst(){ rerunAct=true;}
+     bool isSquashAfter() const { return staticInst->isSquashAfter(); }
+     bool isMemBarrier()   const { return staticInst->isMemBarrier(); }
+     bool isWriteBarrier() const { return staticInst->isWriteBarrier(); }
+@@ -614,7 +662,7 @@
+     {
+         if (!instResult.empty()) {
+             instResult.front().get(t);
+-            instResult.pop();
++            instResult.pop_front();
+         }
+     }
+ 
+@@ -632,34 +680,121 @@
+         if (instFlags[RecordResult]) {
+             Result instRes;
+             instRes.set(t);
+-            instResult.push(instRes);
++            instResult.push_back(instRes);
++        }
++    }
++    template <class T>
++    void popResult2(T& t)
++    {
++        /* if (!instResult2.empty()) { */
++        /*     instResult2.front().get(t); */
++        /*     instResult2.pop_front(); */
++        /* } */
++    }
++    /** Pops a input off the instInput queue */
++    template <class T>
++    void popInput(T& t)
++    {
++        if (!instInput.empty()) {
++            instInput.front().get(t);
++            instInput.pop();
+         }
+     }
+ 
++    /** Read the most recent input stored by this instruction */
++    template <class T>
++    void readInput(T& t)
++    {
++        instInput.back().get(t);
++    }
++
++    /** Pushes a input onto the instInput queue */
++    template <class T>
++    void setInput(T t,int idx)
++    {
++            input_t instRes;
++            instRes.r.set(t);
++            instRes.idx=idx;
++            instInput.push_back(instRes);
++    }
++    template <class T>
++    void setInput(T t,int idx,inTypes_t typ)
++    {
++            input_t instRes;
++            instRes.r.set(t);
++            instRes.tp=typ;
++            instRes.idx=idx;
++            instInput.push_back(instRes);
++    }
++   
++
++    /** Read the most recent result stored by this instruction */
++    template <class T>
++    void readResult2(T& t)
++    {
++        /* instResult2.back().get(t); */
++    }
++
++    /** Pushes a result onto the instResult queue */
++    template <class T>
++    void setResult2(T t)
++    {
++        /* if (instFlags[RecordResult]) { */
++        /*     Result instRes; */
++        /*     instRes.set(t); */
++        /*     instResult2.push_back(instRes); */
++        /* } */
++    }
++
+     /** Records an integer register being set to a value. */
+     void setIntRegOperand(const StaticInst *si, int idx, IntReg val)
+     {
+-        setResult<uint64_t>(val);
++            setResult<uint64_t>(val);
+     }
+ 
+     /** Records a CC register being set to a value. */
+     void setCCRegOperand(const StaticInst *si, int idx, CCReg val)
+     {
+-        setResult<uint64_t>(val);
++            setResult<uint64_t>(val);
+     }
+ 
+     /** Records an fp register being set to a value. */
+     void setFloatRegOperand(const StaticInst *si, int idx, FloatReg val)
+     {
+-        setResult<double>(val);
++            setResult<double>(val);
+     }
+ 
+     /** Records an fp register being set to an integer value. */
+     void setFloatRegOperandBits(const StaticInst *si, int idx, FloatRegBits val)
+     {
+-        setResult<uint64_t>(val);
++            setResult<uint64_t>(val);
++    }
++    void setReadMiscRegOperand(MiscReg val,int idx){
++        setInput<uint64_t>(val,idx,jMisc_t);
+     }
+ 
++    void setReadIntReg(IntReg val,int idx){
++        setInput<uint64_t>(val,idx,jInt_t);
++    }
++    void setReadFloatReg(FloatReg val,int idx){
++        setInput<double>(val,idx,jFloat_t);
++    }
++   void setReadFloatRegOperandBits(FloatRegBits val,int idx){
++        setInput<uint64_t>(val,idx,jFloat_t);
++    }
++    void setReadFloatRegOperand(FloatReg val,int idx){
++        setInput<double>(val,idx,jFloat_t);
++    }
++
++   void setReadCCReg(CCReg val,int idx){
++       setInput<uint64_t>(val,idx,jCC_t);
++   }
++    void setReadMiscReg(MiscReg val,int idx){
++        setInput<uint64_t>(val,idx,jMisc_t);
++    }
++
++    
++
+     /** Records that one of the source registers is ready. */
+     void markSrcRegReady();
+ 
+@@ -785,6 +920,23 @@
+ 
+     /** Returns whether or not this instruction is squashed in the ROB. */
+     bool isSquashedInROB() const { return status[SquashedInROB]; }
++    /*
++     * this one is for the local execution to be marked faulty or not. 
++     */
++    void setRerun(){status.set(ReRunCompleted);}
++
++    void resetRerun(){status.reset(ReRunCompleted);}
++    
++    bool checkRerun(){return status[ReRunCompleted];}
++
++    bool checkAgain;
++    void setCheckAgain(){
++        checkAgain=true;
++    }
++
++    bool isCheckAgain(){
++        return checkAgain;
++    }
+ 
+     /** Read the PC state of this instruction. */
+     TheISA::PCState pcState() const { return pc; }
+diff  -urN ./src/cpu/base_dyn_inst_impl.hh pirafix/src/cpu/base_dyn_inst_impl.hh
+--- ./src/cpu/base_dyn_inst_impl.hh	2017-09-11 14:39:25.599266130 +0100
++++ pirafix/src/cpu/base_dyn_inst_impl.hh	2017-09-11 14:02:56.421123000 +0100
+@@ -86,6 +86,8 @@
+ void
+ BaseDynInst<Impl>::initVars()
+ {
++    checkAgain=false;
++    rerunAct=false;
+     memData = NULL;
+     effAddr = 0;
+     physEffAddrLow = 0;
+@@ -94,7 +96,7 @@
+     memReqFlags = 0;
+ 
+     status.reset();
+-
++    status[ReRunCompleted]=false;
+     instFlags.reset();
+     instFlags[RecordResult] = true;
+     instFlags[Predicate] = true;
+diff  -urN ./src/cpu/base.hh pirafix/src/cpu/base.hh
+--- ./src/cpu/base.hh	2017-09-11 14:38:38.675630896 +0100
++++ pirafix/src/cpu/base.hh	2017-09-11 14:02:56.386121000 +0100
+@@ -306,6 +306,10 @@
+     void regProbePoints() M5_ATTR_OVERRIDE;
+ 
+     void registerThreadContexts();
++    /*
++     * Pause a CPU.
++     */
++    virtual void pause(bool pause) {}
+ 
+     /**
+      * Prepare for another CPU to take over execution.
+diff  -urN ./src/cpu/commonTypes.hh pirafix/src/cpu/commonTypes.hh
+--- ./src/cpu/commonTypes.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/commonTypes.hh	2017-01-04 15:55:25.622719000 +0000
+@@ -0,0 +1,5 @@
++#ifndef __comm_types__hh
++#define __comm_types__hh
++
++enum inTypes_t{jFloat_t, jInt_t, jCC_t, jMisc_t};
++#endif
+diff  -urN ./src/cpu/o3/commit.hh pirafix/src/cpu/o3/commit.hh
+--- ./src/cpu/o3/commit.hh	2017-09-11 14:34:45.333574279 +0100
++++ pirafix/src/cpu/o3/commit.hh	2017-09-11 14:02:56.579130000 +0100
+@@ -51,6 +51,7 @@
+ #include "cpu/inst_seq.hh"
+ #include "cpu/timebuf.hh"
+ #include "sim/probe/probe.hh"
++#include<random>
+ 
+ struct DerivO3CPUParams;
+ 
+@@ -86,6 +87,7 @@
+     // Typedefs from the Impl.
+     typedef typename Impl::O3CPU O3CPU;
+     typedef typename Impl::DynInstPtr DynInstPtr;
++    typedef typename Impl::DynInst DynInst;
+     typedef typename Impl::CPUPol CPUPol;
+ 
+     typedef typename CPUPol::RenameMap RenameMap;
+@@ -314,6 +316,8 @@
+     /** Marks completed instructions using information sent from IEW. */
+     void markCompletedInsts();
+ 
++    void pause();
++
+     /** Gets the thread to commit, based on the SMT policy. */
+     ThreadID getCommittingThread();
+ 
+@@ -382,6 +386,9 @@
+      */
+     bool wroteToTimeBuffer;
+ 
++    bool pauseSet;
++    void checkPauseReset();
++
+     /** Records if the number of ROB entries has changed this cycle. If it has,
+      * then the number of free entries must be re-broadcast.
+      */
+@@ -460,7 +467,7 @@
+ 
+     /** The sequence number of the last commited instruction. */
+     InstSeqNum lastCommitedSeqNum[Impl::MaxThreads];
+-
++    
+     /** Records if there is a trap currently in flight. */
+     bool trapInFlight[Impl::MaxThreads];
+ 
+@@ -489,6 +496,10 @@
+     /** Updates commit stats based on this instruction. */
+     void updateComInstStats(DynInstPtr &inst);
+ 
++    float frate;
++
++      std::default_random_engine generator;
++
+     /** Stat for the total number of squashed instructions discarded by commit.
+      */
+     Stats::Scalar commitSquashedInsts;
+@@ -526,6 +537,7 @@
+ 
+     /** Number of cycles where the commit bandwidth limit is reached. */
+     Stats::Scalar commitEligibleSamples;
++    Stats::Scalar commitFaulty;
+ };
+ 
+ #endif // __CPU_O3_COMMIT_HH__
+diff  -urN ./src/cpu/o3/commit_impl.hh pirafix/src/cpu/o3/commit_impl.hh
+--- ./src/cpu/o3/commit_impl.hh	2017-09-11 14:34:45.333574279 +0100
++++ pirafix/src/cpu/o3/commit_impl.hh	2017-09-11 14:02:56.590122000 +0100
+@@ -60,8 +60,10 @@
+ #include "cpu/timebuf.hh"
+ #include "debug/Activity.hh"
+ #include "debug/Commit.hh"
++#include "debug/CommitInst.hh"
+ #include "debug/CommitRate.hh"
+ #include "debug/Drain.hh"
++#include "debug/Pirafix.hh"
+ #include "debug/ExecFaulting.hh"
+ #include "debug/O3PipeView.hh"
+ #include "params/DerivO3CPU.hh"
+@@ -118,6 +120,7 @@
+     _nextStatus = Inactive;
+     std::string policy = params->smtCommitPolicy;
+ 
++    pauseSet=false;
+     //Convert string to lowercase
+     std::transform(policy.begin(), policy.end(), policy.begin(),
+                    (int(*)(int)) tolower);
+@@ -158,6 +161,7 @@
+         squashAfterInst[tid] = NULL;
+     }
+     interrupt = NoFault;
++    frate=(params->accuracyRate);
+ }
+ 
+ template <class Impl>
+@@ -285,6 +289,11 @@
+         .name(name() + ".bw_lim_events")
+         .desc("number cycles where commit BW limit reached")
+         ;
++    commitFaulty
++        .name(name() + ".faultyCount")
++        .desc("number of Instructions where instruction was deemed faulty")
++        ;
++
+ }
+ 
+ template <class Impl>
+@@ -465,7 +474,11 @@
+         priority_list.erase(thread_it);
+     }
+ }
++template <class Impl>
++void
++DefaultCommit<Impl>::pause(){
+ 
++}
+ 
+ template <class Impl>
+ void
+@@ -725,7 +738,11 @@
+ 
+     updateStatus();
+ }
+-
++template <class Impl>
++void
++DefaultCommit<Impl>::checkPauseReset(){
++    pauseSet=false;
++}
+ template <class Impl>
+ void
+ DefaultCommit<Impl>::handleInterrupt()
+@@ -813,7 +830,12 @@
+         if (cpu->checkInterrupts(cpu->tcBase(0)))
+             propagateInterrupt();
+     }
+-
++    
++    
++//    checkPauseReset();
++//    if(pauseSet){
++//        return;
++//    }
+     ////////////////////////////////////
+     // Check for any possible squashes, handle them first
+     ////////////////////////////////////
+@@ -928,6 +950,8 @@
+ 
+     while (threads != end) {
+         ThreadID tid = *threads++;
++        toIEW->commitInfo[tid].freeROBEntries = rob->numFreeEntries(tid);
++        DPRINTF(Commit,"[tid:%lli] Changed the number of ROB to IEW\n",tid);
+ 
+         if (changedROBNumEntries[tid]) {
+             toIEW->commitInfo[tid].usedROB = true;
+@@ -1027,6 +1051,11 @@
+             bool commit_success = commitHead(head_inst, num_committed);
+ 
+             if (commit_success) {
++                DPRINTF(CommitInst, "Commit %s %s [tid:%lli] [sn:%lli]"
++                        "\n",
++                        head_inst->pcState(), head_inst->staticInst->getName(),
++                        tid ,head_inst->seqNum);
++
+                 ++num_committed;
+                 statCommittedInstType[tid][head_inst->opClass()]++;
+                 ppCommit->notify(head_inst);
+@@ -1060,8 +1089,25 @@
+ 
+                 // If this is an instruction that doesn't play nicely with
+                 // others squash everything and restart fetch
+-                if (head_inst->isSquashAfter())
++                static std::uniform_real_distribution<double> distribution(0.0,1.0);
++                bool faultPred=false;
++                if(head_inst->checkRerun()){
++                    double val=distribution(generator);
++                    faultPred= val>frate;
++                }
++
++                if (head_inst->isSquashAfter()||faultPred){
++                    if(faultPred)
++                        commitFaulty++;
++
+                     squashAfter(tid, head_inst);
++                    if(cpu->ibuffer!=NULL)
++                        cpu->ibuffer->clear(cpu->cpuId());
++                        cpu->corrector->clear();
++                    /* DPRINTF(CommitInst, "Squash after %s %s" */
++                    /*     "\n", */
++                    /*     head_inst->pcState(), head_inst->staticInst->getName()); */
++                }
+ 
+                 if (drainPending) {
+                     if (pc[tid].microPC() == 0 && interrupt == NoFault &&
+@@ -1131,11 +1177,20 @@
+ DefaultCommit<Impl>::commitHead(DynInstPtr &head_inst, unsigned inst_num)
+ {
+     assert(head_inst);
+-
+     ThreadID tid = head_inst->threadNumber;
+ 
+     // If the instruction is not executed yet, then it will need extra
+     // handling.  Signal backwards that it should be executed.
++    // Add information on whether the instruction has been reExecuted or not. 
++    if(cpu->cpuId()==0&&tid==0)
++     if(cpu->corrector->getPair(head_inst)!=(DynInstPtr)NULL){ 
++         if(cpu->corrector->pairCompleted(head_inst)){ 
++             DPRINTF(Pirafix,"[sn:%lli] Pair Executed\n",head_inst->seqNum); 
++         }else{ 
++             DPRINTF(Pirafix,"[sn:%lli] Waiting for the pair to complete\n",head_inst->seqNum); 
++             return false;
++         } 
++     } 
+     if (!head_inst->isExecuted()) {
+         // Keep this number correct.  We have not yet actually executed
+         // and committed this instruction.
+@@ -1274,6 +1329,7 @@
+     }
+ 
+     // Update the commit rename map
++    if(tid==0)
+     for (int i = 0; i < head_inst->numDestRegs(); i++) {
+         renameMap[tid]->setEntry(head_inst->flattenedDestRegIdx(i),
+                                  head_inst->renamedDestRegIdx(i));
+diff  -urN ./src/cpu/o3/corrector.cc pirafix/src/cpu/o3/corrector.cc
+--- ./src/cpu/o3/corrector.cc	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/corrector.cc	2017-09-11 14:02:56.600124000 +0100
+@@ -0,0 +1,3 @@
++#include"cpu/o3/corrector_impl.hh"
++template class CorrectorMain<O3CPUImpl>;
++
+diff  -urN ./src/cpu/o3/corrector.hh pirafix/src/cpu/o3/corrector.hh
+--- ./src/cpu/o3/corrector.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/corrector.hh	2017-09-11 14:02:56.620138000 +0100
+@@ -0,0 +1,37 @@
++#ifndef __Corrector__hh__
++#define __Corrector__hh__
++#include<map>
++#include"params/Corrector.hh"
++#include "sim/clocked_object.hh"
++#include "mem/port.hh"
++#include "params/IBuffer.hh"
++#include "sim/clocked_object.hh"
++#include "cpu/o3/dyn_inst.hh"
++#include "cpu/o3/impl.hh"
++template <class Impl>
++class CorrectorMain : public ClockedObject
++{
++    typedef typename Impl::DynInstPtr DynInstPtr;
++    std::map<int,int> seqMap;
++    std::map<int,DynInstPtr> seqInstMap;
++    typedef typename std::map<int,DynInstPtr>::iterator instIter;
++    typedef typename std::map<int,int>::iterator intIter;
++    public:
++    typedef CorrectorParams Params;
++    CorrectorMain(const Params*params):ClockedObject(params){};
++    CorrectorMain():ClockedObject(NULL){};
++    void addInstruction(DynInstPtr a, DynInstPtr b);
++    DynInstPtr getPair(DynInstPtr a);
++    bool testCorrectness(DynInstPtr a);
++    bool pairCompleted(DynInstPtr a);
++    void clearInst(DynInstPtr a);
++    void clear();
++    
++};
++class Corrector:public CorrectorMain<O3CPUImpl>{
++    public:
++        typedef CorrectorParams Params;
++        const Params* params()const{return dynamic_cast<const Params*>(_params);}
++        Corrector(const Params*params):CorrectorMain<O3CPUImpl>(params){}
++};
++#endif
+diff  -urN ./src/cpu/o3/corrector_impl.hh pirafix/src/cpu/o3/corrector_impl.hh
+--- ./src/cpu/o3/corrector_impl.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/corrector_impl.hh	2017-09-11 14:02:56.638142000 +0100
+@@ -0,0 +1,73 @@
++#include"cpu/o3/corrector.hh"
++template <class Impl>
++void CorrectorMain<Impl>::addInstruction(DynInstPtr a, DynInstPtr b){
++
++    DynInstPtr pl=b;
++    seqInstMap[a->seqNum]=b;
++    seqMap[a->seqNum]=b->seqNum;
++
++    /* cout<<b->staticInst->getName()<<" Placing "; */ 
++    /* cout<<b->seqNum<<" "; */
++    /* cout<<a->staticInst->getName()<<" Placing  "; */ 
++    /* cout<<a->seqNum<<endl; */
++}
++template <class Impl>
++typename CorrectorMain<Impl>::DynInstPtr CorrectorMain<Impl>::getPair(DynInstPtr a){
++
++    instIter it=seqInstMap.find(a->seqNum);
++    intIter st=seqMap.find(a->seqNum);
++
++    if(st!=seqMap.end())
++    if(it!=seqInstMap.end()){
++        if(st->second!=it->second->seqNum){
++            cout<<"Mayhem!!!"<<endl;
++            exit(-1);
++        }
++        return it->second;
++    }
++    return (DynInstPtr)NULL;
++
++}
++
++template <class Impl>
++bool CorrectorMain<Impl>::testCorrectness(DynInstPtr a){
++    bool res=true;
++    instIter it=seqInstMap.find(a);
++    intIter st=seqMap.find(a->seqNum);
++    if(st!=seqMap.end())
++    if(it!=seqInstMap.end()){
++        clearInst(a);
++    }
++    return res;
++}
++
++template <class Impl>
++bool CorrectorMain<Impl>::pairCompleted(DynInstPtr a){
++    DynInstPtr b=getPair(a);
++    /* cout<<b->staticInst->getName()<<" "; */ 
++    /* cout<<b->seqNum<<" "; */
++    /* cout<<a->staticInst->getName()<<" "; */ 
++    /* cout<<a->seqNum<<endl; */
++
++
++    if(b->isExecuted()||b->isSquashed()){
++        seqInstMap[a]=(DynInstPtr)NULL;
++        seqInstMap.erase(a);
++        return true;
++    }
++
++    return false;
++}
++template <class Impl>
++void CorrectorMain<Impl>::clearInst(DynInstPtr a){
++    seqInstMap.erase(a);    
++    seqMap.erase(a->seqNum);   
++}
++template <class Impl>
++void CorrectorMain<Impl>::clear(){
++    seqInstMap.clear();   
++    seqMap.clear();
++}
++Corrector* CorrectorParams::create(){
++    return new Corrector(this);
++}
+diff  -urN ./src/cpu/o3/Corrector.py pirafix/src/cpu/o3/Corrector.py
+--- ./src/cpu/o3/Corrector.py	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/Corrector.py	2017-09-11 14:02:56.442121000 +0100
+@@ -0,0 +1,10 @@
++from ClockedObject import ClockedObject
++from m5.params import *
++from m5.defines import buildEnv
++from m5.proxy import *
++
++class Corrector(ClockedObject):
++    type = 'Corrector'
++    cxx_header = "cpu/o3/corrector.hh"
++    nCPUs=Param.Unsigned(1,"Number of CPUs in the system")
++
+diff  -urN ./src/cpu/o3/cpu.cc pirafix/src/cpu/o3/cpu.cc
+--- ./src/cpu/o3/cpu.cc	2017-09-11 14:38:18.483787756 +0100
++++ pirafix/src/cpu/o3/cpu.cc	2017-09-11 14:02:56.685127000 +0100
+@@ -196,13 +196,27 @@
+ 
+       globalSeqNum(1),
+       system(params->system),
+-      lastRunningCycle(curCycle())
++      lastRunningCycle(curCycle()),
++      fingp(params->ePatterns,params->ePatternRatio)
+ {
+     if (!params->switched_out) {
+         _status = Running;
+     } else {
+         _status = SwitchedOut;
+     }
++    if(params->ibuffer){
++       ibuffer= dynamic_cast<IBufferMain<Impl>*>(params->ibuffer);
++       ibuffer->addPredictor(&predFil,cpuId());
++       ibuffer->changeSRate(cpuId(),params->samplingRate);
++
++    }else{
++        ibuffer=NULL;
++    }
++    if(params->corrector){
++       corrector= dynamic_cast<CorrectorMain<Impl>*>(params->corrector);
++    }else{
++        corrector=NULL;
++    }
+ 
+     if (params->checker) {
+         BaseCPU *temp_checker = params->checker;
+@@ -388,6 +402,8 @@
+ 
+         // Add the TC to the CPU's list of TC's.
+         this->threadContexts.push_back(tc);
++        if(tid==1)
++            insertThread(tid);
+     }
+ 
+     // FullO3CPU always requires an interrupt controller.
+@@ -398,6 +414,7 @@
+ 
+     for (ThreadID tid = 0; tid < this->numThreads; tid++)
+         this->thread[tid]->setFuncExeInst(0);
++    predFil.init(params->ePatterns);
+ }
+ 
+ template <class Impl>
+@@ -544,7 +561,6 @@
+     ppCycles->notify(1);
+ 
+ //    activity = false;
+-
+     //Tick each of the stages
+     fetch.tick();
+ 
+@@ -774,52 +790,39 @@
+     DPRINTF(O3CPU,"[tid:%i] Initializing thread into CPU");
+     // Will change now that the PC and thread state is internal to the CPU
+     // and not in the ThreadContext.
+-    ThreadContext *src_tc;
+-    if (FullSystem)
+-        src_tc = system->threadContexts[tid];
+-    else
+-        src_tc = tcBase(tid);
+ 
+     //Bind Int Regs to Rename Map
+-    for (int ireg = 0; ireg < TheISA::NumIntRegs; ireg++) {
++    for (RegIndex ridx = 0; ridx < TheISA::NumIntRegs; ++ridx) {
++        // Note that we can't use the rename() method because we don't
++        // want special treatment for the zero register at this point
+         PhysRegIndex phys_reg = freeList.getIntReg();
+-
+-        renameMap[tid].setEntry(ireg,phys_reg);
+-        scoreboard.setReg(phys_reg);
++        renameMap[tid].setIntEntry(ridx, phys_reg);
++        commitRenameMap[tid].setIntEntry(ridx, phys_reg);
+     }
+ 
+-    //Bind Float Regs to Rename Map
+-    int max_reg = TheISA::NumIntRegs + TheISA::NumFloatRegs;
+-    for (int freg = TheISA::NumIntRegs; freg < max_reg; freg++) {
++    for (RegIndex ridx = 0; ridx < TheISA::NumFloatRegs; ++ridx) {
+         PhysRegIndex phys_reg = freeList.getFloatReg();
+-
+-        renameMap[tid].setEntry(freg,phys_reg);
+-        scoreboard.setReg(phys_reg);
++        renameMap[tid].setFloatEntry(ridx, phys_reg);
++        commitRenameMap[tid].setFloatEntry(ridx, phys_reg);
+     }
+ 
+-    //Bind condition-code Regs to Rename Map
+-    max_reg = TheISA::NumIntRegs + TheISA::NumFloatRegs + TheISA::NumCCRegs;
+-    for (int creg = TheISA::NumIntRegs + TheISA::NumFloatRegs;
+-         creg < max_reg; creg++) {
++    for (RegIndex ridx = 0; ridx < TheISA::NumCCRegs; ++ridx) {
+         PhysRegIndex phys_reg = freeList.getCCReg();
+-
+-        renameMap[tid].setEntry(creg,phys_reg);
+-        scoreboard.setReg(phys_reg);
++        renameMap[tid].setCCEntry(ridx, phys_reg);
++        commitRenameMap[tid].setCCEntry(ridx, phys_reg);
+     }
+ 
++
++    //Bind condition-code Regs to Rename Map
+     //Copy Thread Data Into RegFile
+     //this->copyFromTC(tid);
+ 
+     //Set PC/NPC/NNPC
+-    pcState(src_tc->pcState(), tid);
+-
+-    src_tc->setStatus(ThreadContext::Active);
+ 
++    if(!switchedOut())
+     activateContext(tid);
+ 
+     //Reset ROB/IQ/LSQ Entries
+-    commit.rob->resetEntries();
+-    iew.resetEntries();
+ }
+ 
+ template <class Impl>
+@@ -1006,6 +1009,10 @@
+         return DrainState::Drained;
+ 
+     DPRINTF(Drain, "Draining...\n");
++    
++    
++    if(ibuffer!=NULL)
++        ibuffer->clear(cpuId());
+ 
+     // We only need to signal a drain to the commit stage as this
+     // initiates squashing controls the draining. Once the commit
+@@ -1182,6 +1189,10 @@
+ 
+     lastRunningCycle = curCycle();
+     _status = Idle;
++    if(numThreads>1){
++
++        activateContext(1);
++    }
+ }
+ 
+ template <class Impl>
+@@ -1599,14 +1610,7 @@
+         ++num;
+     }
+ }
+-/*
+-template <class Impl>
+-void
+-FullO3CPU<Impl>::wakeDependents(DynInstPtr &inst)
+-{
+-    iew.wakeDependents(inst);
+-}
+-*/
++
+ template <class Impl>
+ void
+ FullO3CPU<Impl>::wakeCPU()
+diff  -urN ./src/cpu/o3/cpu.hh pirafix/src/cpu/o3/cpu.hh
+--- ./src/cpu/o3/cpu.hh	2017-09-11 14:38:11.043845539 +0100
++++ pirafix/src/cpu/o3/cpu.hh	2017-09-11 14:02:56.734130000 +0100
+@@ -57,6 +57,7 @@
+ #include "base/statistics.hh"
+ #include "config/the_isa.hh"
+ #include "cpu/o3/comm.hh"
++#include "cpu/o3/ibuffer.hh"
+ #include "cpu/o3/cpu_policy.hh"
+ #include "cpu/o3/scoreboard.hh"
+ #include "cpu/o3/thread_state.hh"
+@@ -64,6 +65,9 @@
+ #include "cpu/base.hh"
+ #include "cpu/simple_thread.hh"
+ #include "cpu/timebuf.hh"
++#include"cpu/o3/corrector.hh"
++#include "cpu/o3/fingerPrinter.hh"
++#include"cpu/o3/predFilter.hh"
+ //#include "cpu/o3/thread_context.hh"
+ #include "params/DerivO3CPU.hh"
+ #include "sim/process.hh"
+@@ -73,7 +77,10 @@
+ class ThreadContext;
+ template <class>
+ class O3ThreadContext;
+-
++template <class>
++class IBufferMain;
++template <class>
++class CorrectorMain;
+ class Checkpoint;
+ class MemObject;
+ class Process;
+@@ -110,6 +117,12 @@
+ 
+     friend class O3ThreadContext<Impl>;
+ 
++    IBufferMain<Impl>* ibuffer;
++    CorrectorMain<Impl>* corrector;
++
++
++
++
+   public:
+     enum Status {
+         Running,
+@@ -511,7 +524,8 @@
+     /** Count of total number of dynamic instructions in flight. */
+     int instcount;
+ #endif
+-
++    O3PredFilter<Impl> predFil;
++    SamplingFilter sampFil;
+     /** List of all the instructions in flight. */
+     std::list<DynInstPtr> instList;
+ 
+@@ -674,6 +688,7 @@
+     /** The cycle that the CPU was last running, used for statistics. */
+     Cycles lastRunningCycle;
+ 
++    FingerPrinter fingp;
+     /** The cycle that the CPU was last activated by a new thread*/
+     Tick lastActivatedCycle;
+ 
+diff  -urN ./src/cpu/o3/decode_impl.hh pirafix/src/cpu/o3/decode_impl.hh
+--- ./src/cpu/o3/decode_impl.hh	2017-09-11 14:34:45.337574244 +0100
++++ pirafix/src/cpu/o3/decode_impl.hh	2017-09-11 14:02:56.750132000 +0100
+@@ -222,7 +222,7 @@
+     bool ret_val = false;
+ 
+     if (stalls[tid].rename) {
+-        DPRINTF(Decode,"[tid:%i]: Stall fom Rename stage detected.\n", tid);
++        DPRINTF(Decode,"[tid:%i]: Stall from Rename stage detected.\n", tid);
+         ret_val = true;
+     }
+ 
+diff  -urN ./src/cpu/o3/dyn_inst.hh pirafix/src/cpu/o3/dyn_inst.hh
+--- ./src/cpu/o3/dyn_inst.hh	2017-09-11 14:34:45.229575178 +0100
++++ pirafix/src/cpu/o3/dyn_inst.hh	2017-09-11 14:02:56.764127000 +0100
+@@ -104,24 +104,39 @@
+     /** Completes the access.  Only valid for memory operations. */
+     Fault completeAcc(PacketPtr pkt);
+ 
++
+   private:
+     /** Initializes variables. */
+     void initVars();
+ 
+   protected:
+     /** Values to be written to the destination misc. registers. */
+-    std::array<MiscReg, TheISA::MaxMiscDestRegs> _destMiscRegVal;
++    std::array<MiscReg, TheISA::MaxMiscDestRegs+20> _destMiscRegVal;
+ 
+     /** Indexes of the destination misc. registers. They are needed to defer
+      * the write accesses to the misc. registers until the commit stage, when
+      * the instruction is out of its speculative state.
+      */
+-    std::array<short, TheISA::MaxMiscDestRegs> _destMiscRegIdx;
++    std::array<short, TheISA::MaxMiscDestRegs+20> _destMiscRegIdx;
+ 
+     /** Number of destination misc. registers. */
+     uint8_t _numDestMiscRegs;
+ 
+ 
++    public:
++
++
++    bool compareInstr(BaseO3DynInst<Impl>* instr)
++    {
++        typename BaseDynInst<Impl>::resultIter iterator1,iterator2;
++        for (iterator1 = BaseDynInst<Impl>::instResult.begin(),iterator2=instr->instResult.begin(); iterator1 != BaseDynInst<Impl>::instResult.end(); ++iterator1,++iterator2) {
++               if(!(BaseDynInst<Impl>::compareVals(*iterator1,*iterator2))){
++                   return false;
++               }
++        }
++        return true;
++    }
++
+   public:
+ #if TRACING_ON
+     /** Tick records used for the pipeline activity viewer. */
+@@ -140,6 +155,7 @@
+      */
+     MiscReg readMiscReg(int misc_reg)
+     {
++        BaseDynInst<Impl>::setReadMiscReg(this->cpu->readMiscReg(misc_reg, this->threadNumber),misc_reg);
+         return this->cpu->readMiscReg(misc_reg, this->threadNumber);
+     }
+ 
+@@ -172,6 +188,9 @@
+      */
+     TheISA::MiscReg readMiscRegOperand(const StaticInst *si, int idx)
+     {
++        BaseDynInst<Impl>::setReadMiscRegOperand( this->cpu->readMiscReg(
++                si->srcRegIdx(idx) - TheISA::Misc_Reg_Base,
++                this->threadNumber),idx);
+         return this->cpu->readMiscReg(
+                 si->srcRegIdx(idx) - TheISA::Misc_Reg_Base,
+                 this->threadNumber);
+@@ -254,22 +273,30 @@
+ 
+     IntReg readIntRegOperand(const StaticInst *si, int idx)
+     {
++        BaseDynInst<Impl>::setReadIntReg(this->cpu->readIntReg(this->_srcRegIdx[idx]),idx);
+         return this->cpu->readIntReg(this->_srcRegIdx[idx]);
+     }
+ 
+     FloatReg readFloatRegOperand(const StaticInst *si, int idx)
+     {
+-        return this->cpu->readFloatReg(this->_srcRegIdx[idx]);
++        FloatReg ival= this->cpu->readFloatReg(this->_srcRegIdx[idx]);
++ BaseDynInst<Impl>::setReadFloatRegOperand(ival,idx);
++        return ival;
+     }
+ 
+     FloatRegBits readFloatRegOperandBits(const StaticInst *si, int idx)
+     {
+-        return this->cpu->readFloatRegBits(this->_srcRegIdx[idx]);
++        FloatRegBits ival=  this->cpu->readFloatRegBits(this->_srcRegIdx[idx]);
++         BaseDynInst<Impl>::setReadFloatRegOperandBits(ival,idx);
++        return ival;
+     }
+ 
+     CCReg readCCRegOperand(const StaticInst *si, int idx)
+     {
+-        return this->cpu->readCCReg(this->_srcRegIdx[idx]);
++        CCReg ival =this->cpu->readCCReg(this->_srcRegIdx[idx]);
++        BaseDynInst<Impl>::setReadCCReg(ival,idx);
++        return ival;
++//            this->cpu->readCCReg(this->_srcRegIdx[idx]);
+     }
+ 
+     /** @todo: Make results into arrays so they can handle multiple dest
+diff  -urN ./src/cpu/o3/feederInstruction.cc pirafix/src/cpu/o3/feederInstruction.cc
+--- ./src/cpu/o3/feederInstruction.cc	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/feederInstruction.cc	2017-09-11 14:02:56.768129000 +0100
+@@ -0,0 +1 @@
++#include"cpu/o3/feederInstruction.hh"
+diff  -urN ./src/cpu/o3/feederInstruction.hh pirafix/src/cpu/o3/feederInstruction.hh
+--- ./src/cpu/o3/feederInstruction.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/feederInstruction.hh	2017-09-11 14:02:56.787124000 +0100
+@@ -0,0 +1,36 @@
++#include"cpu/static_inst.hh"
++class FeederInstruction: public StaticInst{
++    public:
++    FeederInstruction(const char*_mnemonic,ExtMachInst _machInst, OpClass __opClass,int8_t srcCount,int8_t destCount):StaticInst(_mnemonic,_machInst,_opClass){
++        flags.reset();
++        /* flags[IsNop]=true; */
++        setSrcCount(srcCount);
++        setDestCount(destCount);
++        _opClass=Enums::IntAlu;
++    }
++
++    void setSrcCount(int8_t sc){
++        _numSrcRegs=sc;
++    }
++    void setDestCount(int8_t dc){
++        _numDestRegs=dc;
++    }
++    void setSrcReg(RegIndex x,int indx){
++        _srcRegIdx[indx]=x;
++    }
++    void setDestReg(RegIndex x,int indx){
++        _destRegIdx[indx]=x;
++    }
++    void setFPDestCount(int8_t fpc){ _numFPDestRegs=fpc;};
++    void setIntDestCount(int8_t idc){_numIntDestRegs=idc;};
++    void setCCCount(int8_t ccc){_numCCDestRegs=ccc;};
++    protected:
++    std::string  generateDisassembly(Addr pc, const SymbolTable *symtab)const {std::string str="invalid instruction";
++    return str;};
++    public:
++    Fault execute(ExecContext *xc,
++                          Trace::InstRecord *traceData) const {return NoFault;};
++
++     void advancePC(TheISA::PCState &pcState) const {};
++
++};
+diff  -urN ./src/cpu/o3/fetch.hh pirafix/src/cpu/o3/fetch.hh
+--- ./src/cpu/o3/fetch.hh	2017-09-11 14:34:45.229575178 +0100
++++ pirafix/src/cpu/o3/fetch.hh	2017-09-11 14:02:56.804128000 +0100
+@@ -179,7 +179,8 @@
+         RoundRobin,
+         Branch,
+         IQ,
+-        LSQ
++        LSQ,
++        PseudoRandom
+     };
+ 
+   private:
+@@ -367,7 +368,9 @@
+ 
+     /** Returns the appropriate thread to fetch using a round robin policy. */
+     ThreadID roundRobin();
+-
++    
++    /** Returns the appropriate thread to fetch using a partial but random policy. */
++    ThreadID pseudoRandomSchedule();
+     /** Returns the appropriate thread to fetch using the IQ count policy. */
+     ThreadID iqCount();
+ 
+@@ -515,6 +518,8 @@
+      */
+     bool interruptPending;
+ 
++    double frate;
++
+     /** Set to true if a pipelined I-cache request should be issued. */
+     bool issuePipelinedIfetch[Impl::MaxThreads];
+ 
+diff  -urN ./src/cpu/o3/fetch_impl.hh pirafix/src/cpu/o3/fetch_impl.hh
+--- ./src/cpu/o3/fetch_impl.hh	2017-09-11 14:38:11.047845507 +0100
++++ pirafix/src/cpu/o3/fetch_impl.hh	2017-09-11 14:02:56.823124000 +0100
+@@ -50,6 +50,7 @@
+ #include <list>
+ #include <map>
+ #include <queue>
++#include<random>
+ 
+ #include "arch/isa_traits.hh"
+ #include "arch/tlb.hh"
+@@ -62,6 +63,7 @@
+ //#include "cpu/checker/cpu.hh"
+ #include "cpu/o3/fetch.hh"
+ #include "cpu/exetrace.hh"
++#include"debug/Pirafix.hh"
+ #include "debug/Activity.hh"
+ #include "debug/Drain.hh"
+ #include "debug/Fetch.hh"
+@@ -73,6 +75,7 @@
+ #include "sim/eventq.hh"
+ #include "sim/full_system.hh"
+ #include "sim/system.hh"
++#include"cpu/o3/feederInstruction.hh"
+ 
+ using namespace std;
+ 
+@@ -133,7 +136,10 @@
+     } else if (policy == "lsqcount") {
+         fetchPolicy = LSQ;
+         DPRINTF(Fetch, "Fetch policy set to LSQ count\n");
+-    } else {
++    } else if (policy == "pseudorandom"){
++        fetchPolicy= PseudoRandom;
++        DPRINTF(Fetch, "Fetch policy set to PseudoRandom\n");
++    }else   {
+         fatal("Invalid Fetch Policy. Options Are: {SingleThread,"
+               " RoundRobin,LSQcount,IQcount}\n");
+     }
+@@ -149,7 +155,7 @@
+     }
+ 
+     branchPred = params->branchPred;
+-
++    frate=params->frontEndAccuracy;
+     for (ThreadID tid = 0; tid < numThreads; tid++) {
+         decoder[tid] = new TheISA::Decoder;
+         // Create space to buffer the cache line data,
+@@ -946,6 +952,7 @@
+     auto tid_itr = activeThreads->begin();
+     std::advance(tid_itr, random_mt.random<uint8_t>(0, activeThreads->size() - 1));
+ 
++    DPRINTF(Fetch,"[tid:%i] Available instructions %i %i\n",*tid_itr,available_insts,activeThreads->size());
+     while (available_insts != 0 && insts_to_decode < decodeWidth) {
+         ThreadID tid = *tid_itr;
+         if (!stalls[tid].decode && !fetchQueue[tid].empty()) {
+@@ -1005,6 +1012,7 @@
+         // If it was a branch mispredict on a control instruction, update the
+         // branch predictor with that instruction, otherwise just kill the
+         // invalid state we generated in after sequence number
++        if(tid!=1){
+         if (fromCommit->commitInfo[tid].mispredictInst &&
+             fromCommit->commitInfo[tid].mispredictInst->isControl()) {
+             branchPred->squash(fromCommit->commitInfo[tid].doneSeqNum,
+@@ -1015,11 +1023,13 @@
+             branchPred->squash(fromCommit->commitInfo[tid].doneSeqNum,
+                               tid);
+         }
++        }
+ 
+         return true;
+     } else if (fromCommit->commitInfo[tid].doneSeqNum) {
+         // Update the branch predictor if it wasn't a squashed instruction
+         // that was broadcasted.
++        if(tid!=1)
+         branchPred->update(fromCommit->commitInfo[tid].doneSeqNum, tid);
+     }
+ 
+@@ -1101,8 +1111,9 @@
+     instruction->setThreadState(cpu->thread[tid]);
+ 
+     DPRINTF(Fetch, "[tid:%i]: Instruction PC %#x (%d) created "
+-            "[sn:%lli].\n", tid, thisPC.instAddr(),
+-            thisPC.microPC(), seq);
++            "[sn:%lli] %s.\n", tid, thisPC.instAddr(),
++            thisPC.microPC(), seq,           instruction->staticInst->
++            disassemble(thisPC.instAddr()));
+ 
+     DPRINTF(Fetch, "[tid:%i]: Instruction is: %s\n", tid,
+             instruction->staticInst->
+@@ -1144,7 +1155,6 @@
+     // Start actual fetch
+     //////////////////////////////////////////
+     ThreadID tid = getFetchingThread(fetchPolicy);
+-
+     assert(!cpu->switchedOut());
+ 
+     if (tid == InvalidThreadID) {
+@@ -1157,8 +1167,47 @@
+ 
+         return;
+     }
+-
+     DPRINTF(Fetch, "Attempting to fetch from [tid:%i]\n", tid);
++    if(tid==1){
++                /* DPRINTF(Pirafix, "Thread Id [tid:%d] Querying  queue size: %lli\n",tid,fetchQueue[tid].size()); */
++        if(cpu->getContext(tid)->getProcessPtr()==NULL){
++            while(!cpu->ibuffer->empty(cpu->cpuId(),true)&&(fetchQueue[tid].size() < (fetchQueueSize-1))){
++                static int count =0;
++                DPRINTF(Pirafix, "Thread Id %d Attempting to get packet\n",tid);
++                DynInstPtr ptr=cpu->ibuffer->getInstruction(cpu->cpuId(),true);
++                if(ptr==(DynInstPtr)NULL)
++                    continue;
++                if(ptr->isSquashed())
++                    continue;
++                DPRINTF(Pirafix,"[tid:%i] [sn:%lli] \n",tid,ptr->seqNum); 
++                FeederInstruction *finst=new FeederInstruction("Invalid Instruction",0,Enums::IntAlu,0,ptr->numSrcRegs());
++                //The reversing is intentional as each of the destination will feed each of the source of the next instruction.
++                for(int i=0;i<ptr->numSrcRegs();i++){
++                    DPRINTF(Pirafix,"Adding feeder dest: %lli\n",ptr->srcRegIdx(i));
++                    finst->setDestReg(ptr->srcRegIdx(i),i);
++                }
++                DynInstPtr instruction2 =
++                    buildInst(tid, finst, ptr->macroop,
++                            ptr->pcState(),ptr->readPredTarg(), true);
++
++                instruction2->setSecondaryRerunInst();
++                DPRINTF(Pirafix, "[tid:%i]: [sn:%lli] rerun id:%d %s \n ", tid, instruction2->seqNum,count,instruction2->isLoad()?"Load":"No Load");
++                DPRINTF(Pirafix, "[tid:%i]: [sn:%lli] rerunning remotely \n ", tid, ptr->seqNum);
++                DynInstPtr instruction =
++                    buildInst(tid, ptr->staticInst, ptr->macroop,
++                          ptr->pcState(),ptr->readPredTarg(), true);
++                count++;
++                instruction->setSecondaryRerunInst();
++                /* instruction->setCanIssue(); */
++                DPRINTF(Pirafix, "[tid:%i]: [sn:%lli] rerun id:%d %s \n ", tid, instruction->seqNum,count,instruction->isLoad()?"Load":"No Load");
++
++                cpu->corrector->addInstruction(ptr,instruction);
++            }
++            return;
++        }
++    }
++
++
+ 
+     // The current PC.
+     TheISA::PCState thisPC = pc[tid];
+@@ -1241,11 +1290,18 @@
+ 
+     const unsigned numInsts = fetchBufferSize / instSize;
+     unsigned blkOffset = (fetchAddr - fetchBufferPC[tid]) / instSize;
++        int reduced_width=0;
++        static std::default_random_engine generator;
++        static std::uniform_real_distribution<double> distribution(0.0,1.0);
++        double value=distribution(generator);
++        if(value>frate){
++            reduced_width=1;
++        }
+ 
+     // Loop through instruction memory from the cache.
+     // Keep issuing while fetchWidth is available and branch is not
+     // predicted taken
+-    while (numInst < fetchWidth && fetchQueue[tid].size() < fetchQueueSize
++    while (numInst < (fetchWidth-reduced_width) && fetchQueue[tid].size() < fetchQueueSize
+            && !predictedBranch && !quiesce) {
+         // We need to process more memory if we aren't going to get a
+         // StaticInst from the rom, the current macroop, or what's already
+@@ -1254,13 +1310,13 @@
+             !decoder[tid]->instReady();
+         fetchAddr = (thisPC.instAddr() + pcOffset) & BaseCPU::PCMask;
+         Addr fetchBufferBlockPC = fetchBufferAlignPC(fetchAddr);
+-
+-        if (needMem) {
+-            // If buffer is no longer valid or fetchAddr has moved to point
+-            // to the next cache block then start fetch from icache.
+-            if (!fetchBufferValid[tid] ||
+-                fetchBufferBlockPC != fetchBufferPC[tid])
+-                break;
++        if(tid==0){
++            if (needMem) {
++                // If buffer is no longer valid or fetchAddr has moved to point
++                // to the next cache block then start fetch from icache.
++                if (!fetchBufferValid[tid] ||
++                        fetchBufferBlockPC != fetchBufferPC[tid])
++                    break;
+ 
+             if (blkOffset >= numInsts) {
+                 // We need to process more memory, but we've run out of the
+@@ -1274,10 +1330,10 @@
+                 while (fetchAddr != pcAddr && blkOffset < numInsts) {
+                     blkOffset++;
+                     fetchAddr += instSize;
++                    }
++                    if (blkOffset >= numInsts)
++                        break;
+                 }
+-                if (blkOffset >= numInsts)
+-                    break;
+-            }
+ 
+             MachInst inst = TheISA::gtoh(cacheInsts[blkOffset]);
+             decoder[tid]->moreBytes(thisPC, fetchAddr, inst);
+@@ -1286,8 +1342,8 @@
+                 blkOffset++;
+                 fetchAddr += instSize;
+                 pcOffset += instSize;
++                }
+             }
+-        }
+ 
+         // Extract as many instructions and/or microops as we can from
+         // the memory we've processed so far.
+@@ -1301,15 +1357,16 @@
+ 
+                     if (staticInst->isMacroop()) {
+                         curMacroop = staticInst;
++                        } else {
++                            pcOffset = 0;
++                        }
+                     } else {
+-                        pcOffset = 0;
++                        // We need more bytes for this instruction so blkOffset and
++                        // pcOffset will be updated
++                        break;
+                     }
+-                } else {
+-                    // We need more bytes for this instruction so blkOffset and
+-                    // pcOffset will be updated
+-                    break;
+                 }
+-            }
++
+             // Whether we're moving to a new macroop because we're at the
+             // end of the current one, or the branch predictor incorrectly
+             // thinks we are...
+@@ -1320,59 +1377,61 @@
+                             thisPC.microPC(), curMacroop);
+                 } else {
+                     staticInst = curMacroop->fetchMicroop(thisPC.microPC());
++                    }
++                    newMacro |= staticInst->isLastMicroop();
+                 }
+-                newMacro |= staticInst->isLastMicroop();
+-            }
+-
+-            DynInstPtr instruction =
+-                buildInst(tid, staticInst, curMacroop,
+-                          thisPC, nextPC, true);
+-
+-            ppFetch->notify(instruction);
+-            numInst++;
++                DynInstPtr instruction =
++                    buildInst(tid, staticInst, curMacroop,
++                            thisPC, nextPC, true);
++                if(cpu->cpuId()==0&&cpu->ibuffer!=NULL){
++                    /* DPRINTF(Pirafix,"[tid:%lli] Checking instruction [sn:%lli] for fault\n",tid,instruction->seqNum); */
++                     cpu->ibuffer->checkFaulty(instruction,cpu->cpuId()); 
++                }
++                ppFetch->notify(instruction);
++                numInst++;
+ 
+ #if TRACING_ON
+-            if (DTRACE(O3PipeView)) {
+-                instruction->fetchTick = curTick();
+-            }
++                if (DTRACE(O3PipeView)) {
++                    instruction->fetchTick = curTick();
++                }
+ #endif
+ 
+-            nextPC = thisPC;
++                nextPC = thisPC;
+ 
+-            // If we're branching after this instruction, quit fetching
+-            // from the same block.
+-            predictedBranch |= thisPC.branching();
+-            predictedBranch |=
+-                lookupAndUpdateNextPC(instruction, nextPC);
+-            if (predictedBranch) {
+-                DPRINTF(Fetch, "Branch detected with PC = %s\n", thisPC);
+-            }
++                // If we're branching after this instruction, quit fetching
++                // from the same block.
++                predictedBranch |= thisPC.branching();
++                predictedBranch |=
++                    lookupAndUpdateNextPC(instruction, nextPC);
++                if (predictedBranch) {
++                    DPRINTF(Fetch, "Branch detected with PC = %s\n", thisPC);
++                }
+ 
+-            newMacro |= thisPC.instAddr() != nextPC.instAddr();
++                newMacro |= thisPC.instAddr() != nextPC.instAddr();
+ 
+-            // Move to the next instruction, unless we have a branch.
+-            thisPC = nextPC;
+-            inRom = isRomMicroPC(thisPC.microPC());
+-
+-            if (newMacro) {
+-                fetchAddr = thisPC.instAddr() & BaseCPU::PCMask;
+-                blkOffset = (fetchAddr - fetchBufferPC[tid]) / instSize;
+-                pcOffset = 0;
+-                curMacroop = NULL;
+-            }
+-
+-            if (instruction->isQuiesce()) {
+-                DPRINTF(Fetch,
+-                        "Quiesce instruction encountered, halting fetch!\n");
+-                fetchStatus[tid] = QuiescePending;
+-                status_change = true;
+-                quiesce = true;
+-                break;
+-            }
+-        } while ((curMacroop || decoder[tid]->instReady()) &&
+-                 numInst < fetchWidth &&
+-                 fetchQueue[tid].size() < fetchQueueSize);
++                // Move to the next instruction, unless we have a branch.
++                thisPC = nextPC;
++                inRom = isRomMicroPC(thisPC.microPC());
++
++                if (newMacro) {
++                    fetchAddr = thisPC.instAddr() & BaseCPU::PCMask;
++                    blkOffset = (fetchAddr - fetchBufferPC[tid]) / instSize;
++                    pcOffset = 0;
++                    curMacroop = NULL;
++                }
+ 
++                if (instruction->isQuiesce()) {
++                    DPRINTF(Fetch,
++                            "Quiesce instruction encountered, halting fetch!\n");
++                    fetchStatus[tid] = QuiescePending;
++                    status_change = true;
++                    quiesce = true;
++                    break;
++                }
++            } while ((curMacroop || decoder[tid]->instReady()) &&
++                    numInst < fetchWidth &&
++                    fetchQueue[tid].size() < fetchQueueSize);
++        }
+         // Re-evaluate whether the next instruction to fetch is in micro-op ROM
+         // or not.
+         inRom = isRomMicroPC(thisPC.microPC());
+@@ -1459,7 +1518,10 @@
+ 
+           case Branch:
+             return branchCount();
+-
++          
++          case PseudoRandom:
++            return pseudoRandomSchedule();
++          
+           default:
+             return InvalidThreadID;
+         }
+@@ -1514,6 +1576,39 @@
+ 
+ template<class Impl>
+ ThreadID
++DefaultFetch<Impl>::pseudoRandomSchedule()
++{
++    static int range=numThreads;
++    if(range==1){
++        ThreadID high_pri=(ThreadID)0;
++        if (fetchStatus[high_pri] == Running ||
++                    fetchStatus[high_pri] == IcacheAccessComplete ||
++                    fetchStatus[high_pri] == Idle){
++            return high_pri;
++        }else{
++            return InvalidThreadID;
++        }
++    }
++
++    static std::default_random_engine generator(rand());
++    static std::uniform_int_distribution<int> distribution(1,20);
++    int id=distribution(generator);
++    if(id>17){
++        if(!cpu->ibuffer->empty(cpu->cpuId(),true))
++            return (ThreadID)1;
++    }
++    
++    ThreadID high_pri=(ThreadID)0;
++    if (fetchStatus[high_pri] == Running ||
++            fetchStatus[high_pri] == IcacheAccessComplete ||
++            fetchStatus[high_pri] == Idle)
++        return high_pri;
++
++    
++    return InvalidThreadID;
++}
++template<class Impl>
++ThreadID
+ DefaultFetch<Impl>::iqCount()
+ {
+     //sorted from lowest->highest
+diff  -urN ./src/cpu/o3/fingerPrinter.cc pirafix/src/cpu/o3/fingerPrinter.cc
+--- ./src/cpu/o3/fingerPrinter.cc	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/fingerPrinter.cc	2017-01-04 15:55:25.802712000 +0000
+@@ -0,0 +1,105 @@
++#include"fingerPrinter.hh"
++#include<random>
++FingerPrinter::FingerPrinter(){
++    smap.clear();
++    cmap.clear();
++}
++FingerPrinter::FingerPrinter(string s,string s2){
++    smap.clear();
++    cmap.clear();
++    init(s,s2);
++}
++void FingerPrinter::init(string s,string s2){
++    if(s=="")
++        return;
++    std::string delimiter = ";";
++
++    size_t pos = 0,p2;
++    std::string token,t2;
++    int val;
++    while ((pos = s.find(delimiter)) != std::string::npos) {
++        token = s.substr(0, pos);
++        p2=s2.find(delimiter);
++        t2 = s2.substr(0, p2);
++        val=atoi(t2.c_str());
++        addInstruction(token,val);
++        s.erase(0, pos + delimiter.length());
++        s2.erase(0, p2 + delimiter.length());
++    }
++
++}
++void FingerPrinter::addInstruction(string str,int rate){
++    smap[str]=rate;
++}
++
++void FingerPrinter::addNumber(int x,int y){
++    cmap[x]=y;
++    cmap2[x]=y;
++}
++
++bool FingerPrinter::isFaulty(int k){
++    bool v=false;
++    if(cmap.find(k)!=cmap.end()){
++        if(rand()%cmap[k]==0)
++            v=true;
++    }
++    return v;
++}
++
++bool FingerPrinter::anyFaulty(){
++    bool val=false;
++    typedef std::map<int,int>::iterator it_type;
++    for(it_type iterator = cmap2.begin(); iterator != cmap2.end(); iterator++) {
++        if(iterator->second==0){
++            val=true;
++            break;
++        }
++    }
++    return val;
++}
++
++bool FingerPrinter::findAllInstrFaults(string str){
++    return isFaulty(str)||anyFaulty();
++}
++
++void FingerPrinter::decrementAll(){
++    typedef std::map<int,int>::iterator it_type;
++    for(it_type iterator = cmap2.begin(); iterator != cmap2.end(); iterator++) {
++        iterator->second--;
++        if(iterator->second==-1){
++            iterator->second=cmap[iterator->first];
++        }
++    }
++}
++
++bool FingerPrinter::isFaulty(string str){
++    bool v=false;
++    if(smap.find(str)!=smap.end()){
++static    std::random_device rd;
++    // Choose a random mean between 1 and 6
++static    std::default_random_engine e1(rd());
++static    std::uniform_int_distribution<int> uniform_dist(1, 10000);
++    int mean = uniform_dist(e1);
++    if(mean%smap[str]==0)
++            v=true;
++    }
++    return v;
++}
++
++template <typename T> bool FingerPrinter::checkAddCorrect(T v1,T v2,T v3){
++    return verifyData(v1,v2,v3,plus<T>());
++}
++
++template <typename T> bool FingerPrinter::checkSubCorrect(T v1,T v2,T v3){
++    return verifyData(v1,v2,v3,minus<T>());
++}
++
++template <typename T> bool FingerPrinter::checkMultCorrect(T v1,T v2,T v3){
++    return verifyData(v1,v2,v3,multiplies<T>());
++}
++
++template <typename T> bool FingerPrinter::checkDivCorrect(T v1,T v2,T v3){
++    return true;
++    //        return verifyData(v1,v2,v3,divides<T>());
++}
++
+diff  -urN ./src/cpu/o3/fingerPrinter.hh pirafix/src/cpu/o3/fingerPrinter.hh
+--- ./src/cpu/o3/fingerPrinter.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/fingerPrinter.hh	2017-01-04 15:55:25.804711000 +0000
+@@ -0,0 +1,58 @@
++#include <cstdlib>
++#include <cstring>
++#include <functional>
++#include <iostream>
++#include <list>
++#include <queue>
++#include <set>
++#include <unordered_set>
++#include <vector>
++#include<map>
++
++using namespace std;
++#define modNum 15
++class FingerPrinter{
++    map<string,int> smap;
++    map<int,int> cmap,cmap2;
++        template <typename F>  typename F::result_type verifyData(typename F::result_type v1, typename F::result_type v2,typename F::result_type v3, F f) {
++            v1=v1%modNum;
++            v2=v2%modNum;
++            v3=v3%modNum;
++            if(f(v1,v2)%modNum!=v3)
++                return false;
++            return true;
++        }
++        void init(string s1,string s2);
++    public:
++        FingerPrinter();
++        FingerPrinter(string s1,string s2);
++ 
++        void addInstruction(string str,int rate);
++
++        void addNumber(int x,int y);
++
++        bool isFaulty(int k);
++
++        bool anyFaulty();
++
++
++        bool findAllInstrFaults(string str);
++
++        void decrementAll();
++
++
++        bool isFaulty(string str);
++
++
++    template <typename T> bool checkAddCorrect(T v1,T v2,T v3);
++
++
++    template <typename T> bool checkSubCorrect(T v1,T v2,T v3);
++
++
++    template <typename T> bool checkMultCorrect(T v1,T v2,T v3);
++
++    
++    template <typename T> bool checkDivCorrect(T v1,T v2,T v3);
++
++};
+diff  -urN ./src/cpu/o3/fu_pool.cc pirafix/src/cpu/o3/fu_pool.cc
+--- ./src/cpu/o3/fu_pool.cc	2017-09-11 14:34:45.237575108 +0100
++++ pirafix/src/cpu/o3/fu_pool.cc	2017-09-11 14:02:56.840134000 +0100
+@@ -42,6 +42,7 @@
+ 
+ #include <sstream>
+ 
++#include<random>
+ #include "cpu/o3/fu_pool.hh"
+ #include "cpu/func_unit.hh"
+ 
+@@ -158,6 +159,7 @@
+ int
+ FUPool::getUnit(OpClass capability)
+ {
++
+     //  If this pool doesn't have the specified capability,
+     //  return this information to the caller
+     if (!capabilityList[capability])
+diff  -urN ./src/cpu/o3/fu_pool.hh pirafix/src/cpu/o3/fu_pool.hh
+--- ./src/cpu/o3/fu_pool.hh	2017-09-11 14:34:45.237575108 +0100
++++ pirafix/src/cpu/o3/fu_pool.hh	2017-09-11 14:02:56.885141000 +0100
+@@ -127,7 +127,6 @@
+     std::vector<FuncUnit *> funcUnits;
+ 
+     typedef std::vector<FuncUnit *>::iterator fuListIterator;
+-
+   public:
+     typedef FUPoolParams Params;
+     /** Constructs a FU pool. */
+diff  -urN ./src/cpu/o3/ibuffer.cc pirafix/src/cpu/o3/ibuffer.cc
+--- ./src/cpu/o3/ibuffer.cc	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/ibuffer.cc	2017-01-04 15:55:25.811711000 +0000
+@@ -0,0 +1,2 @@
++#include"cpu/o3/ibuffer_impl.hh"
++template class IBufferMain<O3CPUImpl>;
+diff  -urN ./src/cpu/o3/ibuffer.hh pirafix/src/cpu/o3/ibuffer.hh
+--- ./src/cpu/o3/ibuffer.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/ibuffer.hh	2017-09-11 14:02:56.900140000 +0100
+@@ -0,0 +1,169 @@
++/*
++ * Copyright (c) 2012 ARM Limited
++ * All rights reserved
++ *
++ * The license below extends only to copyright in the software and shall
++ * not be construed as granting a license to any other intellectual
++ * property including but not limited to intellectual property relating
++ * to a hardware implementation of the functionality of the software
++ * licensed hereunder.  You may use the software subject to the license
++ * terms below provided that you ensure that this notice is replicated
++ * unmodified and in its entirety in all distributions of the software,
++ * modified or unmodified, in source code or in binary form.
++ *
++ * Copyright (c) 2002-2005 The Regents of The University of Michigan
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met: redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer;
++ * redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution;
++ * neither the name of the copyright holders nor the names of its
++ * contributors may be used to endorse or promote products derived from
++ * this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * Authors: Ron Dreslinski
++ *          Andreas Hansson
++ */
++
++
++#ifndef __IBuffer_HH__
++#define __IBuffer_HH__
++
++#include<queue>
++#include<deque>
++#include "mem/port.hh"
++#include "params/IBuffer.hh"
++#include "sim/clocked_object.hh"
++#include "cpu/o3/dyn_inst.hh"
++#include "cpu/o3/impl.hh"
++#include "cpu/o3/predFilter.hh"
++
++template <class Impl>
++class IBufferMain : public ClockedObject
++{
++    typedef typename Impl::CPUPol CPUPolicy;
++    typedef typename Impl::DynInstPtr DynInstPtr;
++    typedef typename Impl::O3CPU O3CPU;
++    
++    int nCPUs;
++    
++    deque<DynInstPtr>** instQueue;
++    
++    deque<DynInstPtr>** backQueue;
++    
++    int buffSize;
++
++    int bufferDelay;
++    
++    O3PredFilter<Impl>** filterArray;
++
++    SamplingFilter **samplingFilter;
++    class AddEvent : public Event
++    {
++      private:
++        /** Pointer to the CPU. */
++        IBufferMain<Impl>* ibuff;
++        DynInstPtr ptr;
++        int qid;
++
++      public:
++        /** Constructs a tick event. */
++        AddEvent(IBufferMain<Impl>*ibuff,DynInstPtr ptr,int qid){
++            this->ibuff=ibuff;
++            this->ptr=ptr;
++            this->qid=qid;
++        };
++
++        /** Processes a tick event, calling tick() on the CPU. */
++        void process(){
++            ibuff->pushToQueue(ptr,qid);
++            delete this;
++        }
++        /** Returns the description of the tick event. */
++        const char *description() const{return "IBuffer Event";};
++    };
++
++    
++    public: 
++
++    void clear(){
++        for(int i=0;i<nCPUs;i++){
++            instQueue[i]->clear();
++            backQueue[i]->clear();
++        }
++    }
++    
++    bool full(int qid);
++
++    void addPredictor(O3PredFilter<Impl>*filter,int id){
++        filterArray[id]=filter;
++    }
++    
++    void addToQueue(DynInstPtr param,int qid=0);
++
++    void addToQueue(DynInstPtr param);
++
++    void pushToQueue(DynInstPtr param,int qid);
++
++    bool checkFaulty(DynInstPtr instr,int qid);
++    
++    typedef IBufferParams Params;
++
++    IBufferMain(const Params *params);
++
++    void shiftInstructions();
++
++    void tick();
++
++    /* void addToQueue(DynInstPtr ptr){ */
++    /*     instQueue.push(ptr); */
++    /* } */
++    
++    DynInstPtr getInstruction(int qid);
++
++    DynInstPtr getInstruction(int qid,bool val);
++
++    
++    bool empty(int qid);
++    bool empty(int qid, bool other);
++
++    void clear(int qid);
++
++    bool empty();
++
++    DynInstPtr getInstruction();
++
++    void changeSRate(int qid,float value){
++        samplingFilter[qid]->changeSRate(value);
++    }
++};
++    
++class IBuffer:public IBufferMain<O3CPUImpl>{
++    public:
++    
++    typedef IBufferParams Params;
++    
++    const Params* params()const
++    {return dynamic_cast<const Params*>(_params);}
++    
++    IBuffer(const Params *params): IBufferMain<O3CPUImpl>(params){
++    }
++
++};
++#endif
+diff  -urN ./src/cpu/o3/ibuffer_impl.hh pirafix/src/cpu/o3/ibuffer_impl.hh
+--- ./src/cpu/o3/ibuffer_impl.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/ibuffer_impl.hh	2017-09-11 14:02:56.918122000 +0100
+@@ -0,0 +1,180 @@
++#include"cpu/o3/ibuffer.hh"
++#include "debug/IBuffer.hh"
++template <class Impl>
++bool
++IBufferMain<Impl>:: full(int qid){
++    DPRINTF(IBuffer,"Size of the buffer is %lli\n",instQueue[qid]->size());
++    return instQueue[qid]->size()>=buffSize;
++}
++template <class Impl>
++bool
++IBufferMain<Impl>::checkFaulty(DynInstPtr instr,int qid){
++    bool retv=false;
++    if(instr->isMemRef()||instr->isLoad()||instr->isStore()||instr->isDirectCtrl() ||instr->isUncondCtrl()){
++        return false;
++    }
++    
++    retv=filterArray[qid]->isFaulty(instr);
++    if(retv){
++        if(!full(qid)&&!samplingFilter[qid]->moveToBackUp())
++        {
++            DPRINTF(IBuffer,"Adding to the Queue %s for [qid:%d]\n",instr->staticInst->getName(),qid);
++            addToQueue(instr,qid);
++        }else{
++            instr->setCheckAgain();
++        }
++    }
++    return retv;
++}
++
++template <class Impl>
++void 
++IBufferMain<Impl>::addToQueue(DynInstPtr param,int qid){
++        AddEvent * addEvent=new AddEvent(this,param,qid);
++        schedule(addEvent, clockEdge(Cycles(bufferDelay)));
++        param->setRerun();
++        /* DPRINTF(IBuffer,"Adding to the back Queue\n"); */
++  //      backQueue[qid].push_back(param);
++}
++
++template <class Impl>
++void 
++ IBufferMain<Impl>::addToQueue(DynInstPtr param){
++    addToQueue(param,0);
++}
++template <class Impl>
++void 
++IBufferMain<Impl>::pushToQueue(DynInstPtr param,int qid){
++    static int count=0;
++        count++;
++
++    instQueue[qid]->push_back(param); //or push(param)
++    DPRINTF(IBuffer,"Adding instruction [sn:%lli] to the front Queue with count %d \n",param->seqNum,count);
++}
++
++typedef IBufferParams Params;
++
++template <class Impl>
++IBufferMain<Impl>::IBufferMain(const Params *params): ClockedObject(params){
++    nCPUs=params->nCPUs;
++    instQueue=new deque<DynInstPtr>*[params->nCPUs];
++    backQueue=new deque<DynInstPtr>*[params->nCPUs];
++    buffSize=params->bufferSize;
++    filterArray=new O3PredFilter<Impl>*[params->nCPUs];
++    samplingFilter=new SamplingFilter*[params->nCPUs];
++    bufferDelay=params->bufferDelay;
++    for(int i=0;i<params->nCPUs;i++){
++        instQueue[i]=new deque<DynInstPtr>();
++        backQueue[i]=new deque<DynInstPtr>();
++//        filterArray[i]=new O3PredFilter<Impl>();
++        samplingFilter[i]=new SamplingFilter(params->samplingRate);
++    }
++}
++
++template <class Impl>
++void 
++IBufferMain<Impl>::shiftInstructions(){
++    for(int i=0;i<nCPUs;i++){
++        while(!backQueue[i]->empty()&&!full(i)){
++            addToQueue(backQueue[i]->front(),i);
++            backQueue[i]->pop_front();
++        }
++    }
++}
++
++template <class Impl>
++void 
++ IBufferMain<Impl>::tick(){
++     return;
++    shiftInstructions();
++}
++
++/* void addToQueue(DynInstPtr ptr){ */
++/*     instQueue.push(ptr); */
++/* } */
++
++template <class Impl>
++typename Impl::DynInstPtr 
++IBufferMain<Impl>::getInstruction(int qid){
++    DynInstPtr ptr=instQueue[qid]->front();
++    DPRINTF(IBuffer,"Getting instruction %lli remain\n",instQueue[qid]->size());
++    /* if(ptr->isExecuted()){ */
++    instQueue[qid]->pop_front();
++    return ptr;
++    /* }else{ */
++        return (DynInstPtr)NULL;
++    /* } */
++}
++
++template <class Impl>
++typename Impl::DynInstPtr 
++IBufferMain<Impl>::getInstruction(int qid,bool val){
++    DynInstPtr ptr=(DynInstPtr)NULL;
++    /* DPRINTF(IBuffer,"CPU ID %d asking for other queues\n",qid); */
++    for(int i=0;i<qid;i++){
++        if(!empty(i)){
++            DynInstPtr ptr=getInstruction(i);
++            DPRINTF(IBuffer,"CPU ID %d succesfully asked for other queues\n",qid);
++            return ptr;
++        }
++    }
++    for(int i=qid+1;i<nCPUs;i++){
++        if(!empty(i)){
++            DynInstPtr ptr=getInstruction(i);
++            DPRINTF(IBuffer,"CPU ID %d succesfully asked for other queues\n",qid);
++            return ptr;
++        }
++    }
++    return ptr;
++}
++
++template <class Impl>
++bool 
++ IBufferMain<Impl>::empty(int qid){
++    return instQueue[qid]->empty();
++}
++
++template <class Impl>
++bool 
++ IBufferMain<Impl>::empty(int qid,bool other){
++     bool retval=true;
++    if(other){ 
++        /* DPRINTF(IBuffer,"CPU ID %d asking for other queues\n",qid); */
++        for(int i=0;i<qid;i++){
++            /* DPRINTF(IBuffer,"[queue id:%d], [size:%d]\n",i,instQueue[i].size()); */
++            retval=instQueue[i]->empty()?retval:false;
++        }
++         for(int i=qid+1;i<nCPUs;i++){
++            retval=instQueue[i]->empty()?retval:false;
++         }
++   
++    }else{
++        /* DPRINTF(IBuffer,"CPU ID %d asking for own queues\n",qid); */
++        return instQueue[qid]->empty();
++    }
++    /* DPRINTF(IBuffer,"Returning a value of %s\n",retval?"True":"False"); */
++    return retval;
++}
++template <class Impl>
++bool 
++IBufferMain<Impl>::empty(){
++    return empty(0);
++}
++template <class Impl>
++void 
++IBufferMain<Impl>::clear(int qid){
++    instQueue[qid]->clear();
++    backQueue[qid]->clear();
++}
++template <class Impl>
++typename Impl::DynInstPtr 
++IBufferMain<Impl>::getInstruction(){
++    return getInstruction(0);
++}
++
++
++
++
++IBuffer* IBufferParams::create(){
++    return new IBuffer(this);
++}
+diff  -urN ./src/cpu/o3/IBuffer.py pirafix/src/cpu/o3/IBuffer.py
+--- ./src/cpu/o3/IBuffer.py	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/IBuffer.py	2017-09-11 14:02:56.477127000 +0100
+@@ -0,0 +1,43 @@
++# Copyright (c) 2006-2007 The Regents of The University of Michigan
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are
++# met: redistributions of source code must retain the above copyright
++# notice, this list of conditions and the following disclaimer;
++# redistributions in binary form must reproduce the above copyright
++# notice, this list of conditions and the following disclaimer in the
++# documentation and/or other materials provided with the distribution;
++# neither the name of the copyright holders nor the names of its
++# contributors may be used to endorse or promote products derived from
++# this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++#
++# Authors: Kevin Lim
++
++from ClockedObject import ClockedObject
++from m5.params import *
++from m5.defines import buildEnv
++from m5.proxy import *
++
++class IBuffer(ClockedObject):
++    type = 'IBuffer'
++    cxx_header = "cpu/o3/ibuffer.hh"
++    bufferSize=Param.Unsigned(15,"Buffer Size")
++    bufferDelay=Param.Unsigned(1,"Cycle delay in adding into the buffer")
++    nCPUs=Param.Unsigned(1,"Number of CPUs in the system")
++    samplingRate=Param.Float(0.5,"Allowing rate")
++
++
++
+diff  -urN ./src/cpu/o3/iew.hh pirafix/src/cpu/o3/iew.hh
+--- ./src/cpu/o3/iew.hh	2017-09-11 14:34:45.237575108 +0100
++++ pirafix/src/cpu/o3/iew.hh	2017-09-11 14:02:56.941147000 +0100
+@@ -171,7 +171,7 @@
+     void squash(ThreadID tid);
+ 
+     /** Wakes all dependents of a completed instruction. */
+-    void wakeDependents(DynInstPtr &inst);
++    /* void wakeDependents(DynInstPtr &inst); */
+ 
+     /** Tells memory dependence unit that a memory instruction needs to be
+      * rescheduled. It will re-execute once replayMemInst() is called.
+diff  -urN ./src/cpu/o3/iew_impl.hh pirafix/src/cpu/o3/iew_impl.hh
+--- ./src/cpu/o3/iew_impl.hh	2017-09-11 14:39:25.603266098 +0100
++++ pirafix/src/cpu/o3/iew_impl.hh	2017-09-11 14:02:56.961123000 +0100
+@@ -61,7 +61,7 @@
+ #include "debug/IEW.hh"
+ #include "debug/O3PipeView.hh"
+ #include "params/DerivO3CPU.hh"
+-
++#include"debug/Pirafix.hh"
+ using namespace std;
+ 
+ template<class Impl>
+@@ -564,13 +564,14 @@
+     }
+ }
+ 
++/*
+ template<class Impl>
+ void
+ DefaultIEW<Impl>::wakeDependents(DynInstPtr &inst)
+ {
+     instQueue.wakeDependents(inst);
+ }
+-
++*/
+ template<class Impl>
+ void
+ DefaultIEW<Impl>::rescheduleMemInst(DynInstPtr &inst)
+@@ -1287,10 +1288,14 @@
+             // Such case can happen when it faulted during ITLB translation.
+             // If we execute the instruction (even if it's a nop) the fault
+             // will be replaced and we will lose it.
+-            if (inst->getFault() == NoFault) {
+-                inst->execute();
+-                if (!inst->readPredicate())
+-                    inst->forwardOldRegs();
++            if(!inst->isSecondaryRerunInst()) {
++                if (inst->getFault() == NoFault) {
++                    inst->execute();
++                    if (!inst->readPredicate())
++                        inst->forwardOldRegs();
++                }
++            }else{
++                DPRINTF(Pirafix,"Finished Executing instruction [sn:%lli]\n",inst->seqNum);
+             }
+ 
+             inst->setExecuted();
+@@ -1411,8 +1416,8 @@
+         DynInstPtr inst = toCommit->insts[inst_num];
+         ThreadID tid = inst->threadNumber;
+ 
+-        DPRINTF(IEW, "Sending instructions to commit, [sn:%lli] PC %s.\n",
+-                inst->seqNum, inst->pcState());
++        DPRINTF(IEW, "Sending instructions to commit, [sn:%lli] PC %s %lli.\n",
++                inst->seqNum, inst->pcState(),inst->numDestRegs());
+ 
+         iewInstsToCommit[tid]++;
+ 
+@@ -1426,8 +1431,8 @@
+ 
+             for (int i = 0; i < inst->numDestRegs(); i++) {
+                 //mark as Ready
+-                DPRINTF(IEW,"Setting Destination Register %i\n",
+-                        inst->renamedDestRegIdx(i));
++                DPRINTF(IEW,"Setting Destination Register %i for instruction [sn:%lli]\n",
++                        inst->renamedDestRegIdx(i),inst->seqNum);
+                 scoreboard->setReg(inst->renamedDestRegIdx(i));
+             }
+ 
+diff  -urN ./src/cpu/o3/inst_queue.hh pirafix/src/cpu/o3/inst_queue.hh
+--- ./src/cpu/o3/inst_queue.hh	2017-09-11 14:34:45.241575074 +0100
++++ pirafix/src/cpu/o3/inst_queue.hh	2017-09-11 14:02:56.979129000 +0100
+@@ -439,6 +439,7 @@
+ 
+     /** Number of instructions currently in flight to FUs */
+     int wbOutstanding;
++    double frate;
+ 
+     /** Delay between commit stage and the IQ.
+      *  @todo: Make there be a distinction between the delays within IEW.
+diff  -urN ./src/cpu/o3/inst_queue_impl.hh pirafix/src/cpu/o3/inst_queue_impl.hh
+--- ./src/cpu/o3/inst_queue_impl.hh	2017-09-11 14:34:45.241575074 +0100
++++ pirafix/src/cpu/o3/inst_queue_impl.hh	2017-09-11 14:02:56.993137000 +0100
+@@ -51,6 +51,7 @@
+ #include "cpu/o3/fu_pool.hh"
+ #include "cpu/o3/inst_queue.hh"
+ #include "debug/IQ.hh"
++#include"debug/Pirafix.hh"
+ #include "enums/OpClass.hh"
+ #include "params/DerivO3CPU.hh"
+ #include "sim/core.hh"
+@@ -121,6 +122,7 @@
+     //Convert string to lowercase
+     std::transform(policy.begin(), policy.end(), policy.begin(),
+                    (int(*)(int)) tolower);
++    frate=params->aluProb;
+ 
+     //Figure out resource sharing policy
+     if (policy == "dynamic") {
+@@ -516,7 +518,11 @@
+ unsigned
+ InstructionQueue<Impl>::numFreeEntries(ThreadID tid)
+ {
+-    return maxEntries[tid] - count[tid];
++    if (iqPolicy != Dynamic){ 
++        return maxEntries[tid] - count[tid];
++    }else{
++        return numFreeEntries();
++    }
+ }
+ 
+ // Might want to do something more complex if it knows how many instructions
+@@ -536,10 +542,14 @@
+ bool
+ InstructionQueue<Impl>::isFull(ThreadID tid)
+ {
+-    if (numFreeEntries(tid) == 0) {
+-        return(true);
+-    } else {
+-        return(false);
++    if (iqPolicy != Dynamic) {
++        if (numFreeEntries(tid) == 0) {
++            return(true);
++        } else {
++            return(false);
++        }
++    }else{
++        return numFreeEntries()==0;
+     }
+ }
+ 
+@@ -592,7 +602,6 @@
+     } else {
+         addIfReady(new_inst);
+     }
+-
+     ++iqInstsAdded;
+ 
+     count[new_inst->threadNumber]++;
+@@ -807,6 +816,7 @@
+ 
+         if (op_class != No_OpClass) {
+             idx = fuPool->getUnit(op_class);
++
+             issuing_inst->isFloating() ? fpAluAccesses++ : intAluAccesses++;
+             if (idx > -1) {
+                 op_latency = fuPool->getOpLatency(op_class);
+@@ -843,6 +853,18 @@
+                     fuPool->freeUnitNextCycle(idx);
+                 }
+             }
++            if(issuing_inst->isCheckAgain())
++                if(op_class==OpClass::IntAlu){
++                    static std::default_random_engine generator;
++                    static std::uniform_real_distribution<double> distribution(0.0,1.0);
++                    double value=distribution(generator);
++                    if(value>frate){
++                        if(cpu->cpuId()==0)
++                        cpu->ibuffer->addToQueue(issuing_inst,cpu->cpuId());
++                        /* cout<<frate<<" "<<value<<endl; */
++                        //                findNext=true;;
++                    }
++                }
+ 
+             DPRINTF(IQ, "Thread %i: Issuing instruction PC %s "
+                     "[sn:%lli]\n",
+diff  -urN ./src/cpu/o3/lsq.hh pirafix/src/cpu/o3/lsq.hh
+--- ./src/cpu/o3/lsq.hh	2017-09-11 14:34:45.241575074 +0100
++++ pirafix/src/cpu/o3/lsq.hh	2017-09-11 14:02:57.011136000 +0100
+@@ -225,11 +225,13 @@
+ 
+     /** Returns if any of the LQs are full. */
+     bool lqFull();
++    bool lqDynFull();
+     /** Returns if the LQ of a given thread is full. */
+     bool lqFull(ThreadID tid);
+ 
+     /** Returns if any of the SQs are full. */
+     bool sqFull();
++    bool sqDynFull();
+     /** Returns if the SQ of a given thread is full. */
+     bool sqFull(ThreadID tid);
+ 
+diff  -urN ./src/cpu/o3/lsq_impl.hh pirafix/src/cpu/o3/lsq_impl.hh
+--- ./src/cpu/o3/lsq_impl.hh	2017-09-11 14:34:45.245575040 +0100
++++ pirafix/src/cpu/o3/lsq_impl.hh	2017-09-11 14:02:57.029136000 +0100
+@@ -589,7 +589,7 @@
+     //@todo: Change to Calculate All Entries for
+     //Dynamic Policy
+     if (lsqPolicy == Dynamic)
+-        return lqFull();
++        return lqDynFull();
+     else
+         return thread[tid].lqFull();
+ }
+@@ -610,7 +610,40 @@
+ 
+     return true;
+ }
++template<class Impl>
++bool
++LSQ<Impl>::lqDynFull()
++{
++    int nLoads=0;
++    list<ThreadID>::iterator threads = activeThreads->begin();
++    list<ThreadID>::iterator end = activeThreads->end();
+ 
++    while (threads != end) {
++        ThreadID tid = *threads++;
++        nLoads+=thread[tid].numLoads(); 
++        if(nLoads>=SQEntries){
++            return true;
++        }
++    }
++    return false;
++}
++template<class Impl>
++bool
++LSQ<Impl>::sqDynFull()
++{
++    int nStores=0;
++    list<ThreadID>::iterator threads = activeThreads->begin();
++    list<ThreadID>::iterator end = activeThreads->end();
++
++    while (threads != end) {
++        ThreadID tid = *threads++;
++        nStores+=thread[tid].numStores(); 
++        if(nStores>=SQEntries){
++            return true;
++        }
++    }
++    return false;
++}
+ template<class Impl>
+ bool
+ LSQ<Impl>::sqFull(ThreadID tid)
+@@ -618,7 +651,7 @@
+      //@todo: Change to Calculate All Entries for
+     //Dynamic Policy
+     if (lsqPolicy == Dynamic)
+-        return sqFull();
++        return sqDynFull();
+     else
+         return thread[tid].sqFull();
+ }
+diff  -urN ./src/cpu/o3/O3CPU.py pirafix/src/cpu/o3/O3CPU.py
+--- ./src/cpu/o3/O3CPU.py	2017-09-11 14:34:45.333574279 +0100
++++ pirafix/src/cpu/o3/O3CPU.py	2017-09-11 14:02:56.555137000 +0100
+@@ -33,6 +33,8 @@
+ from FUPool import *
+ from O3Checker import O3Checker
+ from BranchPredictor import *
++from IBuffer import IBuffer
++from Corrector import Corrector
+ 
+ class DerivO3CPU(BaseCPU):
+     type = 'DerivO3CPU'
+@@ -87,7 +89,6 @@
+     issueWidth = Param.Unsigned(8, "Issue width")
+     wbWidth = Param.Unsigned(8, "Writeback width")
+     fuPool = Param.FUPool(DefaultFUPool(), "Functional Unit pool")
+-
+     iewToCommitDelay = Param.Cycles(1, "Issue/Execute/Writeback to commit "
+                "delay")
+     renameToROBDelay = Param.Cycles(1, "Rename to reorder buffer delay")
+@@ -130,14 +131,14 @@
+     numROBEntries = Param.Unsigned(192, "Number of reorder buffer entries")
+ 
+     smtNumFetchingThreads = Param.Unsigned(1, "SMT Number of Fetching Threads")
+-    smtFetchPolicy = Param.String('SingleThread', "SMT Fetch policy")
+-    smtLSQPolicy    = Param.String('Partitioned', "SMT LSQ Sharing Policy")
++    smtFetchPolicy = Param.String('PseudoRandom', "SMT Fetch policy")
++    smtLSQPolicy    = Param.String('Dynamic', "SMT LSQ Sharing Policy")
+     smtLSQThreshold = Param.Int(100, "SMT LSQ Threshold Sharing Parameter")
+-    smtIQPolicy    = Param.String('Partitioned', "SMT IQ Sharing Policy")
++    smtIQPolicy    = Param.String('Dynamic', "SMT IQ Sharing Policy")
+     smtIQThreshold = Param.Int(100, "SMT IQ Threshold Sharing Parameter")
+-    smtROBPolicy   = Param.String('Partitioned', "SMT ROB Sharing Policy")
+-    smtROBThreshold = Param.Int(100, "SMT ROB Threshold Sharing Parameter")
+-    smtCommitPolicy = Param.String('RoundRobin', "SMT Commit Policy")
++    smtROBPolicy   = Param.String('Dynamic', "SMT ROB Sharing Policy")
++    smtROBThreshold = Param.Int(40, "SMT ROB Threshold Sharing Parameter")
++    smtCommitPolicy = Param.String('OldestReady', "SMT Commit Policy")
+ 
+     branchPred = Param.BranchPredictor(TournamentBP(numThreads =
+                                                        Parent.numThreads),
+@@ -145,6 +146,23 @@
+     needsTSO = Param.Bool(buildEnv['TARGET_ISA'] == 'x86',
+                           "Enable TSO Memory model")
+ 
++    ePatterns =Param.String("","Single parameter to hold all the errors")
++    ePatternRatio =Param.String("","Single parameter to hold the probability of each error occuring")
++
++    ibuffer = Param.IBuffer(NULL, "checker CPU")
++    corrector=Param.Corrector(NULL,"Corrector Module")
++#The three tunable parameters to setup our method.
++    accuracyRate=Param.Float(1.1,"Rate of correctness of the predictor at commit")
++    frontEndAccuracy=Param.Float(1.1,"Rate of correctness of fetchFault")
++    aluProb=Param.Float(1.1,"Rate that the alu is not faulty")
++    samplingRate=Param.Float(0.5,"Allowing rate")
++
++    def addCorrector(self,corrector):
++        self.corrector=corrector
++    def addIBuffer(self,ibuffer):
++        self.ibuffer=ibuffer
++
++
+     def addCheckerCpu(self):
+         if buildEnv['TARGET_ISA'] in ['arm']:
+             from ArmTLB import ArmTLB
+diff  -urN ./src/cpu/o3/predFilter.cc pirafix/src/cpu/o3/predFilter.cc
+--- ./src/cpu/o3/predFilter.cc	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/predFilter.cc	2017-09-11 14:02:57.047144000 +0100
+@@ -0,0 +1,7 @@
++#include"cpu/o3/predFilter_impl.hh"
++#include "cpu/o3/isa_specific.hh"
++
++
++class SamplingFilter;
++template class O3PredFilter<O3CPUImpl>;
++
+diff  -urN ./src/cpu/o3/predFilter.hh pirafix/src/cpu/o3/predFilter.hh
+--- ./src/cpu/o3/predFilter.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/predFilter.hh	2017-09-11 14:02:57.066134000 +0100
+@@ -0,0 +1,180 @@
++#ifndef __CPU_O3_PREDFIL_HH__
++#define __CPU_O3_PREDFIL_HH__
++
++#include<random>
++#include <cstdlib>
++#include <cstring>
++#include <iostream>
++#include <list>
++#include <queue>
++#include <set>
++#include <unordered_set>
++#include <vector>
++using namespace std;
++
++class faultType{
++
++    bool counterType,predictedType,faulty;
++
++    enum FaultStage{fetchS,decodeS,renameS,issueS,execS,wbS,commitS,unknownS};
++
++
++
++    public:
++
++    faultType(){
++        counterType=false;
++        predictedType=false;
++    }
++
++    inline void setCounter(bool val){
++        counterType=true;
++    }
++
++    inline bool getCounter(){
++        return counterType;
++    }
++
++    inline void setPredicted(bool val){
++        predictedType=val;
++    }
++
++    inline bool getPredicted(){
++        return predictedType;
++    }
++    inline bool getFaulty(){
++        return faulty;
++    }
++
++    inline void setFaulty(bool val){
++        faulty=val;
++    }
++};
++class counterPair{
++    int val,curr;
++    public:
++    counterPair(int a, int b);
++    void updateCurr();
++    inline bool checkCounter();
++    inline int getVal() const;
++    inline int getCurr() const;
++    friend bool operator==(const counterPair& a,const counterPair&b );
++    friend bool operator<(const counterPair& a,const counterPair&b );
++    friend bool operator>(const counterPair& a,const counterPair&b );
++    /* bool operator==(const counterPair&b ){ */
++    /*     return (val==b.getVal()&&curr==b.getCurr()); */
++    /* } */
++};
++bool operator==(const counterPair& a,const counterPair&b );
++bool operator<(const counterPair& a,const counterPair&b );
++bool operator>(const counterPair& a,const counterPair&b );
++
++enum instrTypes_t{jarith_t, jshift_t, jlogic_t, jmisc_t,jUnknown_t};
++//template<class Impl> 
++class SamplingFilter;
++/* template <class Impl> */
++class PredictiveFilter{
++    /* friend template<class Impl>class SamplingFilter; */
++    static const char * arithList[];
++    static const char * shiftList[];
++    static const char* logicList[];
++    static const char* miscList[];
++
++    static const unordered_set<string> arithwords;
++    static const unordered_set<string> shiftwords;
++    static const unordered_set<string> logicwords;
++    static const unordered_set<string> miscwords;
++
++    set<string> faultyList;
++
++
++    bool *aluFault;
++
++
++    set<counterPair>faultyCounters;
++
++
++    public:
++    // Typedefs from the Impl here.
++    //    typedef typename Impl::DynInstPtr DynInstPtr;
++    PredictiveFilter();
++
++    void setAluFault(int id, bool val);
++
++    void init(string str);
++
++    bool checkBits(int32_t val,bool thumb);
++    void testPerformance();
++
++    instrTypes_t findType(const char* str);
++    instrTypes_t findType(string str);
++
++    void addFaulty(string str);
++
++    void addFaulty(int counter,int val);
++
++    void updateCounters();
++
++
++    bool checkCounter();
++
++    bool checkWithUpdateCounter();
++/*
++    bool isFaulty(DynInstPtr& ptr){
++        currentCounter++;
++        currentCounter%=1000000;
++        bool val=checkCounter();
++        val|=isFaulty(ptr->staticInst->getName());
++        ptr->setFaulty(val);
++        return val;
++    }
++*/
++    bool isFaulty(string str);
++};
++template<class Impl>
++class O3PredFilter:public PredictiveFilter{
++
++    int currentCounter;
++    typedef typename Impl::DynInstPtr DynInstPtr;
++    public:
++    O3PredFilter(){
++        currentCounter=0;
++    }
++    using PredictiveFilter::isFaulty;
++    bool isFaulty(DynInstPtr ptr);
++};
++
++class SamplingFilter{
++    friend class PredictiveFilter;
++    float srate;
++
++    public:
++    void changeSRate(float nrate){
++        srate=nrate;
++    }
++
++    SamplingFilter(){
++        srate=0.5;
++        /* sval=3;tval=10; */
++    }
++    SamplingFilter(float srate){
++        this->srate=srate;
++        /* tval=10; */
++    }
++    /* void countingTrigger(bool v){ */
++    /*     tval++; */
++    /*     if(!v){ */
++    /*         sval++; */
++    /*     } */
++    /* } */
++    bool moveToBackUp(){
++        static std::default_random_engine generator;
++        static std::uniform_real_distribution<double> distribution(0.0,1.0);
++        double value=distribution(generator);
++        if(value>srate)
++            return true;
++        return false;
++    }
++};
++/* #include"predFilter_impl.hh" */
++#endif
+diff  -urN ./src/cpu/o3/predFilter_impl.hh pirafix/src/cpu/o3/predFilter_impl.hh
+--- ./src/cpu/o3/predFilter_impl.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/predFilter_impl.hh	2017-09-11 14:02:57.085141000 +0100
+@@ -0,0 +1,350 @@
++#include"cpu/o3/predFilter.hh"
++
++counterPair::counterPair(int a, int b=0){
++    val=a;
++    curr=b;
++}
++void counterPair::updateCurr(){
++    curr++;
++    curr%=val;
++}
++inline bool counterPair::checkCounter(){
++    return curr==0;
++}
++inline int counterPair::getVal() const{
++    return val;
++}
++inline int counterPair::getCurr() const{
++    return curr;
++}
++
++#define searchNow(val,l1,iter,retval){iter=l1.find(val);if(iter!=l1.end())return retval;}
++bool operator==(const counterPair& a,const counterPair&b ){
++    return (a.getVal()==b.getVal() && a.getCurr()==b.getCurr());
++}
++
++bool operator<(const counterPair& a,const counterPair&b ){
++    if(a.getVal()!=b.getVal())
++        return a.getVal()<b.getVal();
++    return a.getCurr()<b.getCurr();
++}
++bool operator>(const counterPair& a,const counterPair&b ){
++    if(a.getVal()!=b.getVal())
++        return a.getVal()>b.getVal();
++    return a.getCurr()>b.getCurr();
++}
++
++PredictiveFilter::PredictiveFilter(){
++    
++}
++
++void PredictiveFilter::setAluFault(int id, bool val){
++    if(id<4){
++        if(!val&&aluFault[id]){
++        }else{
++            aluFault[id]=val;
++        }
++    }
++}
++
++bool PredictiveFilter::checkBits(int32_t val,bool thumb){
++    return false;
++}
++void PredictiveFilter::testPerformance(){
++    for (auto i = arithwords.begin(); i != arithwords.end(); ++i) {
++        findType(*i);
++    }
++    for (auto i = shiftwords.begin(); i != shiftwords.end(); ++i) {
++        findType(*i);
++    }
++    for (auto i = logicwords.begin(); i != logicwords.end(); ++i) {
++        findType(*i);
++    }
++    for (auto i = miscwords.begin(); i != miscwords.end(); ++i) {
++        findType(*i);
++    }
++}
++instrTypes_t PredictiveFilter::findType(const char* str){
++    std::unordered_set<std::string>::const_iterator got;
++    searchNow(str,arithwords,got,jarith_t);
++    searchNow(str,shiftwords,got,jshift_t);
++    searchNow(str,logicwords,got,jlogic_t);
++    searchNow(str,miscwords,got,jmisc_t);
++    return jUnknown_t;
++}
++instrTypes_t PredictiveFilter::findType(string str){
++    std::unordered_set<std::string>::const_iterator got;
++    searchNow(str,arithwords,got,jarith_t);
++    searchNow(str,shiftwords,got,jshift_t);
++    searchNow(str,logicwords,got,jlogic_t);
++    searchNow(str,miscwords,got,jmisc_t);
++    return jUnknown_t;
++}
++
++void PredictiveFilter::addFaulty(string str){
++    if(findType(str)!=jUnknown_t){
++        if(faultyList.find(str)==faultyList.end()){
++            faultyList.insert(str);
++        }
++    }
++}
++
++void PredictiveFilter::addFaulty(int counter,int val){
++    counterPair cp(counter,val);
++    if(faultyCounters.find(cp)==faultyCounters.end()){
++        faultyCounters.insert(cp);
++    }
++}
++
++void PredictiveFilter::updateCounters(){
++    for(auto f:faultyCounters){
++        f.updateCurr();
++    }
++}
++void PredictiveFilter::init(string s){
++    if(s=="")
++        return;
++    std::string delimiter = ";";
++
++    size_t pos = 0;
++    std::string token;
++    while ((pos = s.find(delimiter)) != std::string::npos) {
++        token = s.substr(0, pos);
++        addFaulty(token);
++        s.erase(0, pos + delimiter.length());
++    }
++}
++
++bool PredictiveFilter::checkCounter(){
++    bool val=false;
++    for(auto f:faultyCounters){
++        if(f.checkCounter()){
++            val=true;
++        }
++    }
++    return val;
++}
++
++bool PredictiveFilter::checkWithUpdateCounter(){
++    bool val=false;
++    for(auto f:faultyCounters){
++        if(f.checkCounter()){
++            val=true;
++            f.updateCurr();
++        }
++    }
++    return val;
++}
++bool PredictiveFilter::isFaulty(string str){
++    if(faultyList.find(str)!=faultyList.end()){
++        return true;
++    }
++    return false;
++}
++template<class Impl>
++bool O3PredFilter<Impl>::isFaulty(DynInstPtr ptr){
++    currentCounter++;
++    currentCounter%=1000000;
++    bool val=checkCounter();
++    val|=isFaulty(ptr->staticInst->getName());
++    return val;
++}
++
++
++const char* PredictiveFilter::arithList[]={"adc",//add with carry
++    "adcs",//add with carry and flag update
++    "add",//Add
++    "addi_uop",
++    "adds",//add with flag update
++    "add_uop",
++    "adr",//Form PC-relative Address
++    "adrs",//Form PC-relative Address with flag update
++    "and",//Bitwise AND
++    "ands",//Bitwise AND with flag update
++    "qadd16",//Saturating Add 16
++    "qadd8",//Saturating Add 8
++    "qadds",//Saturating Add
++    "qasx",//saturating add and subtract with exchange
++    "qdadds",//Saturating Double and Add
++    "qdsubs",//Saturating Double and Subtract
++    "qsax",//Saturating subtract and add with exchange
++    "qsub",//Saturating Subtract
++    "qsub16",//saturating subtract", two halfwords
++    "qsub8",//saturating subtract", four words
++    "qsubs",//saturating subtract
++    "rsb",//Reverse Subtract
++    "rsbs",//Reverse Subtract with flag update
++    "rsc",//Reverse Subtract with carry
++    "rscs",//Reverse Subtract with carr with flag update
++    "sadd16s",//signed add", two halfwords
++    "sadd8s",//signed add", four words
++    "sasx",//signed add and subtract with exchange
++    "sasxs",// signed add and subtract with exchange
++    "sbc",//Subtract with Carry
++    "sbcs",//Subtract with Carry with flag update
++    "shadd16",//signed halving  add", two halfwords
++    "shadd8",//signed halving add", four words
++    "shasx",//signed halving add and subtract with exchange
++    "shasxs",//signed halving
++    "shsax",//signed halving subtract and add with exchange
++    "shsaxs",//signed halving
++    "shsub16",//signed halving  subtract", two halfwords
++    "shsub8",//signed halving subtract", four words
++    "ssat",//Signed Saturate
++    "ssat16",//Signed Saturate 16
++    "ssax",
++    "ssaxs",
++    "ssub16s",//signed subtract", two halfwords
++    "ssub8s",//signed subtract", four words
++    "sub",//Subtract with Carry
++    "subi_uop",
++    "subs",//Subtract with Carry with flag update
++    "sxtab",//Signed Extend and Add Byte
++    "sxtab16",//Signed Extend and Add Byte 16
++    "sxtah",//Signed Extend and Add Halfword
++    "sxtb",//Signed Extend Byte
++    "sxtb16",//Signed Extend Byte 16
++    "sxth",//Signed Extend Halfword
++    "uadd16s",//unsigned add", two halfwords
++    "uadd8s",//unsigned add", four words
++    "uasxs",//unsigned add and subtract with exchange
++    "uhadd16",//unsigned halving  add", two halfwords
++    "uhadd8",//unsigned halving add", four words
++    "uhasx",//unsigned halving add and subtract with exchange
++    "uhsax",//unsigned halving  subtract and add with exchange
++    "uhsub16",//unsigned halving  subtract", two halfwords
++    "uhsub8",//unsigned halving  subtract", four words
++    "uqadd16",//unsigned saturating  add", two halfwords
++    "uqadd8",//unsigned saturating add", four words
++    "uqasx",//unsigned saturating add and subtract with exchange
++    "uqsax",//unsigned saturating  subtract and add with exchange
++    "uqsub16",//unsigned saturating  subtract", two halfwords
++    "uqsub8",//unsigned saturating  subtract", four words
++    "usad8",//Unsigned Sum of Absolute Differences
++    "usada8",//Unsigned Sum of Absolute Differences and Accumulate
++    "usaxs",// unsigned  subtract and add with exchange
++    "ssax",//Signed subtract and add with exchange
++    "ssaxs",//Signed subtract and add with exchange with flag update
++    "usub16s",//unsigned subtract", two halfwords
++    "usub8s",//unsigned subtract", four words
++    "uxtab",//Unsigned Extend and Add Byte
++    "uxtab16",//Unsigned Extend and Add Byte 16
++    "uxtah",//Unsigned Extend and Add Halfword
++};
++const char* PredictiveFilter::shiftList[]={
++    "sxtb",//Signed Extend Byte
++    "sxtb16",//Signed Extend Byte 16
++    "sxth",//Signed Extend Halfword
++    "usat",//Unsigned Saturate
++    "usat16",//Unsigned Saturate 16
++    "uxtb",//Unsigned Extend Byte
++    "uxtb16",//Unsigned Extend Byte 16
++    "uxth",//Unsigned Extend Halfword
++    "ssat",//Signed Saturate
++    "ssat16",//Signed Saturate 16
++    "pkhbt",//combine half words
++    "pkhtb",//combine half words
++    "rev",//Byte-Reverse Word
++    "rev16",//Byte-Reverse Packed Halfword
++    "revsh",//Byte-Reverse Signed Halfword
++};
++const char* PredictiveFilter::logicList[]={
++    "bfc",//bitfield clear
++    "bfi",//bit field insert
++    "bic",//Bitwise Bit Clear
++    "bics",//Bitwise Bit Clear with flag update
++    "cbnz",//conditionally branch on non zero
++    "cbz",//Compare and Branch on Zero
++    "clrex",//Clear-Exclusive
++    "clz",//clear leading zeroes
++    "cmn",//Compare Negative
++    "cmns",//Compare Negative with flag update
++    "cmp",//Compare
++    "cmps",//Compare with flag update
++    "eor",//Bitwise Exclusive OR
++    "eors",//Bitwise Exclusive OR with flag update
++    "mvn",//Bitwise NOT
++    "mvns",//Bitwise NOT with flag update
++    "nop",//No Operation
++    "orn",//Bitwise OR NOT
++    "orns",//Bitwise OR NOT with flag update
++    "orr",//Bitwise OR
++    "orrs",//Bitwise OR with flag update
++    "sbfx",//Signed Bit Field Extract
++    "sel",//Select Bytes using GE flags
++    "ubfx",//Unsigned Bit Field Extract
++    "rbit",//reverse bit
++    "teq",//Test Equivalence
++    "teqs",//Test Equivalence with flag update
++    "tst",//Test
++    "tsts",//Test with flag update
++};
++const char* PredictiveFilter::miscList[]={
++    "b",//branch to address
++    "bkpt",//breakpoint
++    "bl",//Call a subroutine
++    "blx",//Call a subroutine", change instruction set
++    "bx",//Branch to target address", change instruction set
++    "cps",//change processor state
++    "dbg",//Debug Hint
++    "dmb",//Data Memory Barrier
++    "dsb",//Data Synchronization Barrier
++    "enterx",//change from Thumb state to ThumbEE state
++    "hdrsh",
++    "isb",//Instruction Synchronization Barrier
++    "it",//If-Then
++    "ldmstm",//
++    "ldr",//load 32-bit word
++    "ldrb",//load  8-bit unsigned byte
++    "ldrbt",//load unpriviledged 8-bit unsigned byte
++    "ldrd",//load Two 32-bit words
++    "ldrh",//load 16-bit unsigned halfword
++    "ldrht",//load unpriviledged 16-bit unsigned halfword
++    "ldrsb",//load 8-bit signed byte
++    "ldrsbt",//load unprivileged 8-bit signed byte
++    "ldrsht",//load unprivileged 16-bit signed halfword
++    "ldrt",//load unprivileged 32-bit word
++    "leavex",//change from ThumbEE state to Thumb state
++    "mcr",//coprocessor instruction
++    "mov",//Copy operand to destination
++    "movret_uop",
++    "movs",//Copy operand to destination with flag update
++    "movt",//move top
++    "movts",//move top with flag update
++    "mrc",//coprocessor instruction
++    "mrs",//value from the APSR into an ARM core register.
++    "msr",//value to the corresponding bits in the APSR.
++    "rfe",
++    "setend",//Set Endianness
++    "sev",//Send Event
++    "str",//store 32-bit word
++    "strb",//store  8-bit byte
++    "strbt",//store unprivileged 8-bit byte
++    "strd",//store Two 32-bit words
++    "strh",//store 16-bit halfword
++    "strht",//store unprivileged 16-bit halfword
++    "strt",//store unprivileged 32-bit word
++    "sub_uop",
++    "svc",//supervisor call
++    "unknown",
++    "uopReg_uop",
++    "uopSet_uop",
++    "vldmstm",
++    "vldmult",
++    "vldsingle",
++    "vstmult",
++    "vstsingle",
++    "wfe",//wait for event
++    "wfi",//wait for interrupt
++    "yield",//yield
++    "srs",//store return state
++};
++
++#define setinit(name1,name2) const unordered_set<string> PredictiveFilter::name1 (PredictiveFilter::name2,PredictiveFilter::name2 + sizeof(PredictiveFilter::name2)/sizeof(PredictiveFilter::name2[0]));
++
++setinit(arithwords,arithList);
++setinit(shiftwords,shiftList);
++setinit(logicwords,logicList);
++setinit(miscwords,miscList);
++
++/* template class O3PredFilter<O3CPUImpl>; */
+diff  -urN ./src/cpu/o3/rename_impl.hh pirafix/src/cpu/o3/rename_impl.hh
+--- ./src/cpu/o3/rename_impl.hh	2017-09-11 14:34:45.249575005 +0100
++++ pirafix/src/cpu/o3/rename_impl.hh	2017-09-11 14:02:57.104128000 +0100
+@@ -697,6 +697,9 @@
+                 storesInProgress[tid]++;
+         }
+         ++renamed_insts;
++        DPRINTF(Rename, "[tid:%u]: Placing instruction [sn:%lli] with "
++                "PC %s. to IEW \n", tid, inst->seqNum, inst->pcState());
++
+ 
+ 
+         // Put instruction in rename queue.
+@@ -1026,8 +1029,8 @@
+             panic("Reg index is out of bound: %d.", src_reg);
+         }
+ 
+-        DPRINTF(Rename, "[tid:%u]: Looking up %s arch reg %i (flattened %i), "
+-                "got phys reg %i\n", tid, RegClassStrings[regIdxToClass(src_reg)],
++        DPRINTF(Rename, "[tid:%u]: [sn:%lli] Looking up %s arch reg %i (flattened %i), "
++                "got phys reg %i\n", tid, inst->seqNum, RegClassStrings[regIdxToClass(src_reg)],
+                 (int)src_reg, (int)flat_rel_src_reg, (int)renamed_reg);
+ 
+         inst->renameSrcReg(src_idx, renamed_reg);
+@@ -1054,6 +1057,7 @@
+     ThreadContext *tc = inst->tcBase();
+     RenameMap *map = renameMap[tid];
+     unsigned num_dest_regs = inst->numDestRegs();
++    DPRINTF(Rename,"[sn:%lli] has %lli destination registers\n",inst->seqNum,inst->numDestRegs());
+ 
+     // Rename the destination registers.
+     for (int dest_idx = 0; dest_idx < num_dest_regs; dest_idx++) {
+@@ -1062,7 +1066,8 @@
+         RegIndex flat_rel_dest_reg;
+         RegIndex flat_uni_dest_reg;
+         typename RenameMap::RenameInfo rename_result;
+-
++    
++        DPRINTF(Rename,"[sn:%lli] Dest id:%lli\n",inst->seqNum,dest_reg);
+         switch (regIdxToClass(dest_reg, &rel_dest_reg)) {
+           case IntRegClass:
+             flat_rel_dest_reg = tc->flattenIntIndex(rel_dest_reg);
+@@ -1098,9 +1103,6 @@
+         // Mark Scoreboard entry as not ready
+         scoreboard->unsetReg(rename_result.first);
+ 
+-        DPRINTF(Rename, "[tid:%u]: Renaming arch reg %i to physical "
+-                "reg %i.\n", tid, (int)flat_rel_dest_reg,
+-                (int)rename_result.first);
+ 
+         // Record the rename information so that a history can be kept.
+         RenameHistory hb_entry(inst->seqNum, flat_uni_dest_reg,
+@@ -1122,6 +1124,9 @@
+         inst->renameDestReg(dest_idx,
+                             rename_result.first,
+                             rename_result.second);
++        DPRINTF(Rename, "[tid:%u]: [sn:%lli] Renaming arch reg %i to physical "
++                "reg %i. \n", tid,inst->seqNum, (int)flat_rel_dest_reg,
++                (int)rename_result.first);
+ 
+         ++renameRenamedOperands;
+     }
+@@ -1246,6 +1251,8 @@
+         freeEntries[tid].lqEntries = fromIEW->iewInfo[tid].freeLQEntries;
+         freeEntries[tid].sqEntries = fromIEW->iewInfo[tid].freeSQEntries;
+     }
++        freeEntries[tid].robEntries =
++            fromCommit->commitInfo[tid].freeROBEntries;
+ 
+     if (fromCommit->commitInfo[tid].usedROB) {
+         freeEntries[tid].robEntries =
+diff  -urN ./src/cpu/o3/rob_impl.hh pirafix/src/cpu/o3/rob_impl.hh
+--- ./src/cpu/o3/rob_impl.hh	2015-03-19 14:14:17.000000000 +0000
++++ pirafix/src/cpu/o3/rob_impl.hh	2017-09-11 14:02:57.122126000 +0100
+@@ -322,7 +322,13 @@
+ unsigned
+ ROB<Impl>::numFreeEntries(ThreadID tid)
+ {
+-    return maxEntries[tid] - threadEntries[tid];
++    DPRINTF(ROB,"For [tid:%lli] Policy=%s, entries:%lli,rob entries: %lli \n",tid,robPolicy,numEntries,numInstsInROB);
++    if (robPolicy != Dynamic){ 
++
++        return maxEntries[tid] - threadEntries[tid];
++    }else{
++        return numFreeEntries()-8;
++    }
+ }
+ 
+ template <class Impl>
+diff  -urN ./src/cpu/o3/samplingFilter.hh pirafix/src/cpu/o3/samplingFilter.hh
+--- ./src/cpu/o3/samplingFilter.hh	1970-01-01 01:00:00.000000000 +0100
++++ pirafix/src/cpu/o3/samplingFilter.hh	2017-09-11 14:02:57.137146000 +0100
+@@ -0,0 +1,8 @@
++#include<iostream>
++#include"instructionFilter.hh"
++using namespace std;
++class samplingFilter:public instructionFilter{
++
++    public:
++
++};
+diff  -urN ./src/cpu/o3/SConscript pirafix/src/cpu/o3/SConscript
+--- ./src/cpu/o3/SConscript	2015-03-19 14:14:16.000000000 +0000
++++ pirafix/src/cpu/o3/SConscript	2017-09-11 14:02:56.574125000 +0100
+@@ -78,3 +78,14 @@
+ 
+     SimObject('O3Checker.py')
+     Source('checker.cc')
++    SimObject('IBuffer.py')
++    SimObject('Corrector.py')
++    Source('predFilter.cc')
++    Source('fingerPrinter.cc')
++    Source('ibuffer.cc')
++    Source('corrector.cc')
++    Source('feederInstruction.cc')
++    DebugFlag('CommitInst')
++    DebugFlag('IBuffer')
++    DebugFlag('Pirafix')
++
+diff  -urN ./src/cpu/simple/atomic.cc pirafix/src/cpu/simple/atomic.cc
+--- ./src/cpu/simple/atomic.cc	2017-09-11 14:38:18.487787725 +0100
++++ pirafix/src/cpu/simple/atomic.cc	2017-01-04 15:55:25.978714000 +0000
+@@ -184,6 +184,17 @@
+ 
+ 
+ void
++AtomicSimpleCPU::pause(bool pause)
++{
++    if (pause && tickEvent.scheduled()) {
++        deschedule(tickEvent);
++    } else if (!pause && !tickEvent.scheduled()) {
++        schedule(tickEvent, nextCycle());
++    }
++}
++
++
++void
+ AtomicSimpleCPU::switchOut()
+ {
+     BaseSimpleCPU::switchOut();
+diff  -urN ./src/cpu/simple/atomic.hh pirafix/src/cpu/simple/atomic.hh
+--- ./src/cpu/simple/atomic.hh	2017-09-11 14:38:18.487787725 +0100
++++ pirafix/src/cpu/simple/atomic.hh	2017-01-04 15:55:25.980711000 +0000
+@@ -188,6 +188,7 @@
+     DrainState drain() M5_ATTR_OVERRIDE;
+     void drainResume() M5_ATTR_OVERRIDE;
+ 
++    void pause(bool pause);
+     void switchOut();
+     void takeOverFrom(BaseCPU *oldCPU);
+ 
+diff  -urN ./src/cpu/simple/AtomicSimpleCPU.py pirafix/src/cpu/simple/AtomicSimpleCPU.py
+--- ./src/cpu/simple/AtomicSimpleCPU.py	2015-03-19 14:14:17.000000000 +0000
++++ pirafix/src/cpu/simple/AtomicSimpleCPU.py	2017-01-04 15:55:25.972712000 +0000
+@@ -58,6 +58,13 @@
+     def support_take_over(cls):
+         return True
+ 
++    @classmethod
++    def export_methods(cls, code):
++        code('''
++    void suspendContext(ThreadID tid);
++    void activateContext(ThreadID tid);
++''')
++
+     width = Param.Int(1, "CPU width")
+     simulate_data_stalls = Param.Bool(False, "Simulate dcache stall cycles")
+     simulate_inst_stalls = Param.Bool(False, "Simulate icache stall cycles")
+diff  -urN ./src/cpu/static_inst.hh pirafix/src/cpu/static_inst.hh
+--- ./src/cpu/static_inst.hh	2017-09-11 14:34:45.273574797 +0100
++++ pirafix/src/cpu/static_inst.hh	2017-09-11 14:02:57.148129000 +0100
+@@ -74,8 +74,8 @@
+     typedef TheISA::RegIndex RegIndex;
+ 
+     enum {
+-        MaxInstSrcRegs = TheISA::MaxInstSrcRegs,        //< Max source regs
+-        MaxInstDestRegs = TheISA::MaxInstDestRegs       //< Max dest regs
++        MaxInstSrcRegs = TheISA::MaxInstSrcRegs+20,        //< Max source regs
++        MaxInstDestRegs = TheISA::MaxInstDestRegs+20       //< Max dest regs
+     };
+ 
+   protected:
+diff  -urN ./src/cpu/thread_state.cc pirafix/src/cpu/thread_state.cc
+--- ./src/cpu/thread_state.cc	2017-09-11 14:34:45.305574520 +0100
++++ pirafix/src/cpu/thread_state.cc	2017-01-04 15:55:26.090712000 +0000
+@@ -118,6 +118,7 @@
+         virtProxy = new FSTranslatingPortProxy(tc);
+     } else {
+         assert(proxy == NULL);
++        if(process!=NULL)
+         proxy = new SETranslatingPortProxy(baseCpu->getDataPort(),
+                                            process,
+                                            SETranslatingPortProxy::NextPage);
+diff  -urN ./src/sim/process.cc pirafix/src/sim/process.cc
+--- ./src/sim/process.cc	2017-09-11 14:38:18.487787725 +0100
++++ pirafix/src/sim/process.cc	2017-09-11 14:02:57.178126000 +0100
+@@ -108,10 +108,14 @@
+ static int
+ openFile(const string& filename, int flags, mode_t mode)
+ {
++    if((flags&O_EXCL)==O_EXCL){
++        flags=flags&(~O_EXCL);
++        flags=flags|O_TRUNC;
++    }
+     int sim_fd = open(filename.c_str(), flags, mode);
+     if (sim_fd != -1)
+         return sim_fd;
+-    fatal("Unable to open %s with mode %O", filename, mode);
++    fatal("Unable to open %s with mode %o", filename, mode);
+ }
+ 
+ static int
