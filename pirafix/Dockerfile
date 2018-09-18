@@ -8,7 +8,9 @@ RUN apt-get clean
 
 # checkout repo with mercurial
 WORKDIR /usr/local/src
-RUN git clone https://github.com/gem5/gem5.git
+RUN hg clone http://repo.gem5.org/gem5; cd gem5
+RUN hg update -r 11115
+RUN patch -p1 pirafix.patch
 # build it
 WORKDIR /usr/local/src/gem5
 RUN git checkout b5bb2a25aa702ad3d1a173e9e86d2addc24d9c13
