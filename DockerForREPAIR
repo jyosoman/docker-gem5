@@ -1,5 +1,5 @@
-FROM ubuntu:latest
-MAINTAINER Eric Van Hensbergen <ericvh@gmail.com>
+FROM ubuntu:14.04
+MAINTAINER Jyothish Soman <jyothish.soman@gmail.com>
 
 # get dependencies
 RUN apt-get update
