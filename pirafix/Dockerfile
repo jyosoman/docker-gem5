@@ -3,7 +3,7 @@ MAINTAINER Jyothish Soman <jyothish.soman@gmail.com>
 
 # get dependencies
 RUN apt-get update
-RUN apt-get install -y build-essential git-core m4 scons zlib1g zlib1g-dev libprotobuf-dev protobuf-compiler libprotoc-dev libgoogle-perftools-dev swig python-dev python
+RUN apt-get install -y build-essential git-core m4 scons zlib1g zlib1g-dev libprotobuf-dev protobuf-compiler libprotoc-dev libgoogle-perftools-dev swig python-dev python mercurial patch
 RUN apt-get clean
 
 # checkout repo with mercurial
@@ -11,6 +11,7 @@ WORKDIR /usr/local/src
 RUN hg clone http://repo.gem5.org/gem5
 WORKDIR gem5
 RUN hg update -r 11115
+ADD pirafix.patch /usr/local/src/gem5/pirafix.patch
 RUN patch -p1 < pirafix.patch
 # build it
 WORKDIR /usr/local/src/gem5
